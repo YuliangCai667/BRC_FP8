@@ -66,4 +66,19 @@ class RewardNormalizer(object):
         denominator = denominator[batches.task_ids]
         rewards = batches.rewards / denominator
         return Batch(observations=batches.observations, actions=batches.actions, rewards=rewards, masks=batches.masks, next_observations=batches.next_observations, task_ids=batches.task_ids)
-   
+
+    def state_dict(self):
+        """Persist completed-trajectory statistics only."""
+        return {
+            'returns_min_norm': self.returns_min_norm.copy(),
+            'returns_max_norm': self.returns_max_norm.copy(),
+        }
+
+    def load_state_dict(self, state):
+        self.returns_min_norm[...] = np.asarray(state['returns_min_norm'], dtype=np.float32)
+        self.returns_max_norm[...] = np.asarray(state['returns_max_norm'], dtype=np.float32)
+        self.step = 0
+        if self.max_steps is None:
+            self.rewards = [[] for _ in range(len(self.returns_min_norm))]
+        else:
+            self.rewards.fill(0)

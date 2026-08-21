@@ -19,6 +19,7 @@ def tree_norm(tree):
 
 @flax.struct.dataclass
 class SaveState:
+    step: int
     params: Params
     opt_state: Optional[optax.OptState] = None
 
@@ -76,15 +77,28 @@ class Model:
         grads, info = grad_fn(self.params)
         return grads
 
-    def save(self, save_path: str):
+    def save(self, save_path: str, include_optimizer: bool = True):
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         with open(save_path, 'wb') as f:
-            f.write(flax.serialization.to_bytes(SaveState(params=self.params, opt_state=self.opt_state)))
+            f.write(flax.serialization.to_bytes(SaveState(
+                step=self.step,
+                params=self.params,
+                opt_state=self.opt_state if include_optimizer else None,
+            )))
 
     def load(self, load_path: str):
         with open(load_path, 'rb') as f:
             contents = f.read()
+        try:
             saved_state = flax.serialization.from_bytes(
-                SaveState(params=self.params, opt_state=self.opt_state), contents
+                SaveState(step=self.step, params=self.params, opt_state=self.opt_state), contents
             )
-        return self.replace(params=saved_state.params, opt_state=saved_state.opt_state)
+        except Exception:
+            saved_state = flax.serialization.from_bytes(
+                SaveState(step=self.step, params=self.params, opt_state=None), contents
+            )
+        return self.replace(
+            step=int(saved_state.step),
+            params=saved_state.params,
+            opt_state=self.opt_state if saved_state.opt_state is None else saved_state.opt_state,
+        )

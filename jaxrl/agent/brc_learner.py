@@ -6,7 +6,15 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from jaxrl.agent.update import build_actor_input, update_actor, update_critic, update_target_critic, update_temperature
+from jaxrl.agent.update import (
+    build_actor_input,
+    get_actor_gradients,
+    get_critic_gradients,
+    update_actor,
+    update_critic,
+    update_target_critic,
+    update_temperature,
+)
 
 from jaxrl.networks import NormalTanhPolicy, Critic, Temperature
 from jaxrl.utils import Model, PRNGKey, Batch
@@ -53,6 +61,77 @@ def _sample_actions(
     rng, key = jax.random.split(rng)
     actions = dist.sample(seed=key)
     return rng, actions
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=('discount', 'num_bins', 'v_max', 'multitask'),
+)
+def _get_gradient_diagnostics(
+    rng,
+    actor,
+    critic,
+    target_critic,
+    temp,
+    batch,
+    discount,
+    num_bins,
+    v_max,
+    multitask,
+):
+    _, actor_key, critic_key = jax.random.split(rng, 3)
+    return {
+        'actor': get_actor_gradients(
+            actor_key, actor, critic, temp, batch, num_bins, v_max, multitask
+        ),
+        'critic': get_critic_gradients(
+            critic_key,
+            actor,
+            critic,
+            target_critic,
+            temp,
+            batch,
+            discount,
+            num_bins,
+            v_max,
+            multitask,
+        ),
+    }
+
+
+@functools.partial(jax.jit, static_argnames=('multitask',))
+def _get_forward_diagnostics(actor, critic, batch, multitask):
+    actor_inputs = build_actor_input(
+        critic, batch.observations, batch.task_ids, multitask
+    )
+    policy = actor(actor_inputs)
+    q_logits = critic(batch.observations, batch.actions, batch.task_ids)
+    _, actor_intermediates = actor.apply_fn.apply(
+        {'params': actor.params}, actor_inputs, mutable=['intermediates']
+    )
+    _, critic_intermediates = critic.apply_fn.apply(
+        {'params': critic.params},
+        batch.observations,
+        batch.actions,
+        batch.task_ids,
+        mutable=['intermediates'],
+    )
+    return {
+        'inputs': {
+            'actor': actor_inputs,
+            'critic_observations': batch.observations,
+            'critic_actions': batch.actions,
+        },
+        'outputs': {
+            'policy_mean': policy.distribution.loc,
+            'policy_std': policy.distribution.scale_diag,
+            'critic_logits': q_logits,
+        },
+        'activations': {
+            'actor': actor_intermediates.get('intermediates', {}),
+            'critic': critic_intermediates.get('intermediates', {}),
+        },
+    }
 
 def _update(
     rng: PRNGKey, 
@@ -226,18 +305,62 @@ class BRC(object):
     def get_temperature(self):
         return _get_temperature(self.temp)
 
+    def get_tensor_diagnostics(self, batch: Batch):
+        """Return device-resident trees used only at tensor-stat intervals."""
+        forward = _get_forward_diagnostics(
+            self.actor, self.critic, batch, self.multitask
+        )
+        gradients = _get_gradient_diagnostics(
+            self.rng,
+            self.actor,
+            self.critic,
+            self.target_critic,
+            self.temp,
+            batch,
+            self.discount,
+            self.num_bins,
+            self.v_max,
+            self.multitask,
+        )
+        return {
+            'params': {
+                'actor': self.actor.params,
+                'critic': self.critic.params,
+                'target_critic': self.target_critic.params,
+                'temperature': self.temp.params,
+            },
+            'optimizer': {
+                'actor': self.actor.opt_state,
+                'critic': self.critic.opt_state,
+                'temperature': self.temp.opt_state,
+            },
+            'gradients': gradients,
+            **forward,
+        }
+
     def reset(self):
         self.step = 1
         self.actor, self.critic, self.target_critic, self.temp, self.rng = self.init_models(self.seeds)
         
-    def save(self, path):
-        self.actor.save(f'{path}/actor.txt')
-        self.critic.save(f'{path}/critic.txt')
-        self.target_critic.save(f'{path}/target_critic.txt')
-        self.temp.save(f'{path}/temp.txt')
+    def save(self, path, include_optimizer=True):
+        self.actor.save(f'{path}/actor.msgpack', include_optimizer)
+        self.critic.save(f'{path}/critic.msgpack', include_optimizer)
+        self.target_critic.save(f'{path}/target_critic.msgpack', include_optimizer)
+        self.temp.save(f'{path}/temp.msgpack', include_optimizer)
+        import pickle
+        with open(f'{path}/agent_state.pkl', 'wb') as file:
+            pickle.dump({'step': self.step, 'rng': np.asarray(self.rng)}, file)
         
     def load(self, path):
-        self.actor = self.actor.load(f'{path}/actor.txt')
-        self.critic = self.actor.load(f'{path}/critic.txt')
-        self.target_critic = self.actor.load(f'{path}/target_critic.txt')
-        self.temp = self.actor.load(f'{path}/temp.txt')
+        import os
+        import pickle
+        self.actor = self.actor.load(f'{path}/actor.msgpack')
+        self.critic = self.critic.load(f'{path}/critic.msgpack')
+        self.target_critic = self.target_critic.load(f'{path}/target_critic.msgpack')
+        self.temp = self.temp.load(f'{path}/temp.msgpack')
+        state_path = f'{path}/agent_state.pkl'
+        if os.path.exists(state_path):
+            with open(state_path, 'rb') as file:
+                state = pickle.load(file)
+            self.step = int(state['step'])
+            self.rng = jnp.asarray(state['rng'])

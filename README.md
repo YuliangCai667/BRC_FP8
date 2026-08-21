@@ -12,6 +12,39 @@ To run the BRC algorithm in a single task mode, just pass a single task name to 
 
 By passing a list of task names, multi-task mode will be enabled. 
 
+## Experiment records and checkpoints
+
+Training now writes a local, append-only run directory under
+`runs/<env_names>/<run_id>/`. It contains per-episode JSONL, periodic training and
+evaluation metrics, tensor summaries, system metrics, reproducibility metadata,
+and atomic checkpoints. W&B is an optional mirror; local recording continues if
+W&B or GPU monitoring is unavailable.
+
+The low-overhead defaults sample training scalars every 1,000 steps, run tensor
+diagnostics every 25,000 steps, save parameter-only analysis checkpoints every
+50,000 steps, and save recovery checkpoints every 100,000 steps. Set an interval
+to `0` to disable that category. Recovery checkpoints include only the valid
+portion of the replay buffer and may be resumed from either the checkpoint itself
+or the run directory:
+
+```bash
+python train.py \
+  --env_names=METAWORLD_ALL \
+  --resume_from=runs/METAWORLD_ALL/<run_id>
+```
+
+Environment simulator state is intentionally not serialized. On resume, all
+environments and unfinished episodes are reset while model, optimizer, RNG,
+normalizer history, episode counts, and replay data are restored.
+
+Resource logs distinguish physical-device allocation from live JAX allocations:
+`system_metrics.csv` reports device-wide NVML usage, while `train_metrics.jsonl`
+and W&B report JAX `bytes_in_use`, peak usage, reserved allocator memory, and the
+device limit. These allocator counters are sampled only at the existing metric
+synchronization boundary. For FP32/FP8 memory comparisons, use the same allocator
+settings for both runs; `XLA_PYTHON_CLIENT_PREALLOCATE=false` makes the physical
+device metric easier to interpret.
+
 ## Citation
 
 If you find this repository useful, feel free to cite our paper using the following bibtex.

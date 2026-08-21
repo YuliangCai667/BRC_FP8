@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Runtime experiment artifacts; local files are the authoritative run data.
+runs/
+wandb/

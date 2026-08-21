@@ -13,9 +13,11 @@ class BronetBlock(nn.Module):
     @nn.compact
     def __call__(self, x: jnp.ndarray):
         res = nn.Dense(self.hidden_dims, kernel_init=default_init())(x)
+        self.sow('intermediates', 'dense_0_output', res)
         res = nn.LayerNorm()(res)
         res = self.activations(res)
         res = nn.Dense(self.hidden_dims, kernel_init=default_init())(res)
+        self.sow('intermediates', 'dense_1_output', res)
         res = nn.LayerNorm()(res)
         return res + x
 
@@ -29,12 +31,14 @@ class BroNet(nn.Module):
     @nn.compact
     def __call__(self, x: jnp.ndarray):
         x = nn.Dense(self.hidden_dims, kernel_init=default_init())(x)
+        self.sow('intermediates', 'input_dense_output', x)
         x = nn.LayerNorm()(x)
         x = self.activations(x)
         for i in range(self.depth):
             x = BronetBlock(self.hidden_dims, self.activations)(x)
         if self.add_final_layer:
             x = nn.Dense(self.output_nodes, kernel_init=default_init())(x)
+            self.sow('intermediates', 'final_dense_output', x)
         return x
 
 class TaskEmbedding(nn.Module): 
