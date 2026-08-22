@@ -76,7 +76,9 @@ def make_env(env_name: str, seed: int = 0) -> gym.Env:
 
 class ParallelEnv():
     
-    def __init__(self, env_names: list, seed: int = 0):
+    def __init__(self, env_names: list, seed: int = 0, metaworld_reset_mode: str = 'frozen'):
+        if metaworld_reset_mode not in ('frozen', 'recreate'):
+            raise ValueError("metaworld_reset_mode must be 'frozen' or 'recreate'")
         
         np.random.seed(seed)
         random.seed(seed)
@@ -106,6 +108,10 @@ class ParallelEnv():
     
         
         self.envs = envs
+        self.env_names = list(env_names)
+        self.metaworld_reset_mode = metaworld_reset_mode
+        self._reset_rng = np.random.RandomState(seed)
+        self.last_reset_seeds = np.full(len(envs), -1, dtype=np.int64)
         self.obs_dims = obs_dims
         self.act_dims = act_dims
         self.state_dim_differences = state_dim_differences
@@ -114,8 +120,25 @@ class ParallelEnv():
         self.num_tasks = len(envs)
         
     def _reset_idx(self, idx: int):
-        seed = np.random.randint(0, 1e8)
-        state, _ = self.envs[idx].reset(seed=seed)
+        if self.metaworld_reset_mode == 'recreate':
+            seed = int(self._reset_rng.randint(0, int(1e8)))
+        else:
+            # Preserve the public implementation's global RNG behavior exactly.
+            seed = int(np.random.randint(0, int(1e8)))
+        self.last_reset_seeds[idx] = seed
+        if (
+            self.metaworld_reset_mode == 'recreate'
+            and '-goal-observable' in self.env_names[idx]
+        ):
+            old_env = self.envs[idx]
+            try:
+                old_env.close()
+            except Exception:
+                pass
+            self.envs[idx] = make_env(self.env_names[idx], seed)
+            state, _ = self.envs[idx].reset()
+        else:
+            state, _ = self.envs[idx].reset(seed=seed)
         state = np.concatenate((state, np.zeros(self.state_dim_differences[idx], dtype=np.float32)), axis=0)
         return state
     

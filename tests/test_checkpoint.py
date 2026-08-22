@@ -70,6 +70,9 @@ class FullCheckpointTest(unittest.TestCase):
         agent.update(batch_for_update, 1, 1)
         jax.tree_util.tree_map(lambda x: x.block_until_ready(), agent.actor.params)
         expected_rng = np.asarray(agent.rng).copy()
+        expected_normalizer_rng = np.asarray(agent.normalizer_rng).copy()
+        expected_task_entropies = np.asarray(agent.task_entropies).copy()
+        expected_task_entropy_counts = np.asarray(agent.task_entropy_counts).copy()
         expected_actor = jax.tree_util.tree_map(lambda x: np.asarray(x).copy(), agent.actor.params)
         expected_opt = jax.tree_util.tree_map(lambda x: np.asarray(x).copy(), agent.actor.opt_state)
 
@@ -84,11 +87,23 @@ class FullCheckpointTest(unittest.TestCase):
                 wandb_id=None, save_replay_buffer=True,
             )
             agent.rng = jax.random.PRNGKey(999)
+            agent.normalizer_rng = jax.random.PRNGKey(998)
+            agent.task_entropies = np.zeros(2, np.float32)
+            agent.task_entropy_counts = np.zeros(2, np.int32)
             buffer.size = 0
             episodes.total_counts[:] = 0
             manifest = manager.load_recovery(path, agent, buffer, normalizer, episodes)
             self.assertEqual(manifest["env_step"], 10)
             np.testing.assert_array_equal(np.asarray(agent.rng), expected_rng)
+            np.testing.assert_array_equal(
+                np.asarray(agent.normalizer_rng), expected_normalizer_rng
+            )
+            np.testing.assert_array_equal(
+                np.asarray(agent.task_entropies), expected_task_entropies
+            )
+            np.testing.assert_array_equal(
+                np.asarray(agent.task_entropy_counts), expected_task_entropy_counts
+            )
             self.assertEqual(buffer.size, 4)
             np.testing.assert_array_equal(episodes.total_counts, [2, 3])
             np.testing.assert_array_equal(normalizer.returns_min_norm, [-3.0, -4.0])

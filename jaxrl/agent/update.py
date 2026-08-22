@@ -11,7 +11,7 @@ def build_actor_input(critic: Model, observations: jnp.ndarray, task_ids: jnp.nd
         inputs = jnp.concatenate((inputs, task_embeddings), axis=-1)
     return inputs
 
-def update_actor(key: PRNGKey, actor: Model, critic: Model, temp: Model, batch: Batch, num_bins: int, v_max: float, multitask: bool):
+def update_actor(key: PRNGKey, actor: Model, critic: Model, temp: Model, batch: Batch, num_bins: int, v_max: float, multitask: bool, num_tasks: int):
     inputs = build_actor_input(critic, batch.observations, batch.task_ids, multitask)
     def actor_loss_fn(actor_params: Params):
         dist = actor.apply({'params': actor_params}, inputs)        
@@ -21,9 +21,17 @@ def update_actor(key: PRNGKey, actor: Model, critic: Model, temp: Model, batch: 
         bin_values = jnp.linspace(start=-v_max, stop=v_max, num=num_bins)[None]
         q_values = (bin_values * q_probs).sum(-1)    
         actor_loss = (log_probs * temp().mean() - q_values).mean()
+        entropy_samples = -log_probs
+        entropy_sums = jnp.bincount(
+            batch.task_ids, weights=entropy_samples, length=num_tasks
+        )
+        entropy_counts = jnp.bincount(batch.task_ids, length=num_tasks)
+        entropy_by_task = entropy_sums / jnp.maximum(entropy_counts, 1)
         return actor_loss, {
             'actor_loss': actor_loss,
-            'entropy': -log_probs.mean(),
+            'entropy': entropy_samples.mean(),
+            '_entropy_by_task': entropy_by_task,
+            '_entropy_counts_by_task': entropy_counts,
             'actor_pnorm': tree_norm(actor_params),
         }
     new_actor, info = actor.apply_gradient(actor_loss_fn)

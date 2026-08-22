@@ -44,13 +44,15 @@ class BroNet(nn.Module):
 class TaskEmbedding(nn.Module): 
     num_tasks: int
     embedding_size: int
+    norm: str = 'l2'
     
     def setup(self):
         self.embeddings = nn.Embed(self.num_tasks, self.embedding_size)
         
     def __call__(self, x: jnp.ndarray):
         emb = self.embeddings(x)
-        norm = jnp.linalg.norm(emb, axis=-1, keepdims=True)
+        ord_value = 1 if self.norm == 'l1' else 2
+        norm = jnp.linalg.norm(emb, ord=ord_value, axis=-1, keepdims=True)
         emb = emb/norm
         return emb
 
@@ -96,10 +98,13 @@ class Critic(nn.Module):
     activations: Callable[[jnp.ndarray], jnp.ndarray] = nn.relu
     output_nodes: int = 101
     multitask: bool = False
+    task_embedding_norm: str = 'l2'
     
     def setup(self):
         if self.multitask:
-            self.task_embedding = TaskEmbedding(self.num_tasks, self.embedding_size)
+            self.task_embedding = TaskEmbedding(
+                self.num_tasks, self.embedding_size, norm=self.task_embedding_norm
+            )
         self.q_value_ensemble = QValueEnsemble(
             ensemble_size=self.ensemble_size,
             hidden_dims=self.hidden_dims, 

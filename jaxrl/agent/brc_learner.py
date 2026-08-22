@@ -20,8 +20,8 @@ from jaxrl.networks import NormalTanhPolicy, Critic, Temperature
 from jaxrl.utils import Model, PRNGKey, Batch
 
 
-@functools.partial(jax.jit, static_argnames=('discount', 'target_entropy', 'num_bins', 'v_max', 'multitask'),)
-@functools.partial(jax.vmap, in_axes=(None, None, None, None, None, 0, None, None, None, None, None))
+@functools.partial(jax.jit, static_argnames=('discount', 'target_entropy', 'num_bins', 'v_max', 'multitask', 'num_tasks'),)
+@functools.partial(jax.vmap, in_axes=(None, None, None, None, None, 0, None, None, None, None, None, None))
 def _get_infos(
     rng: PRNGKey, 
     actor: Model, 
@@ -33,11 +33,14 @@ def _get_infos(
     target_entropy: float, 
     num_bins: int, 
     v_max: float,
-    multitask: bool
+    multitask: bool,
+    num_tasks: int,
 ):
     rng, actor_key, critic_key = jax.random.split(rng, 3)
     _, critic_info = update_critic(critic_key, actor, critic, target_critic, temp, batch, discount, num_bins, v_max, multitask)
-    _, actor_info = update_actor(actor_key, actor, critic, temp, batch, num_bins, v_max, multitask) 
+    _, actor_info = update_actor(
+        actor_key, actor, critic, temp, batch, num_bins, v_max, multitask, num_tasks
+    )
     _, alpha_info = update_temperature(temp, actor_info['entropy'], target_entropy)
     return {
         **critic_info,
@@ -61,6 +64,31 @@ def _sample_actions(
     rng, key = jax.random.split(rng)
     actions = dist.sample(seed=key)
     return rng, actions
+
+
+@functools.partial(
+    jax.jit, static_argnames=('num_bins', 'v_max', 'multitask')
+)
+def _estimate_bootstrap_values(
+    rng,
+    actor,
+    critic,
+    target_critic,
+    observations,
+    task_ids,
+    num_bins,
+    v_max,
+    multitask,
+):
+    """Estimate V(s') = E_a[Q_target(s', a)] at time-limit boundaries."""
+    inputs = build_actor_input(critic, observations, task_ids, multitask)
+    policy = actor(inputs)
+    rng, key = jax.random.split(rng)
+    actions = policy.sample(seed=key)
+    logits = target_critic(observations, actions, task_ids)
+    probabilities = jax.nn.softmax(logits, axis=-1).mean(axis=0)
+    support = jnp.linspace(-v_max, v_max, num_bins)
+    return rng, (probabilities * support).sum(axis=-1)
 
 
 @functools.partial(
@@ -145,12 +173,15 @@ def _update(
     target_entropy: float, 
     num_bins: int, 
     v_max: float,
-    multitask: bool
+    multitask: bool,
+    num_tasks: int,
 ):
     rng, actor_key, critic_key = jax.random.split(rng, 3)
     new_critic, critic_info = update_critic(critic_key, actor, critic, target_critic, temp, batch, discount, num_bins, v_max, multitask)
     new_target_critic = update_target_critic(new_critic, target_critic, tau)
-    new_actor, actor_info = update_actor(actor_key, actor, new_critic, temp, batch, num_bins, v_max, multitask) 
+    new_actor, actor_info = update_actor(
+        actor_key, actor, new_critic, temp, batch, num_bins, v_max, multitask, num_tasks
+    )
     new_temp, alpha_info = update_temperature(temp, actor_info['entropy'], target_entropy)
     return rng, new_actor, new_critic, new_target_critic, new_temp, {
         **critic_info,
@@ -158,7 +189,7 @@ def _update(
         **alpha_info,
     }
 
-@functools.partial(jax.jit, static_argnames=('discount', 'tau', 'target_entropy', 'num_bins', 'v_max', 'multitask', 'num_updates'))
+@functools.partial(jax.jit, static_argnames=('discount', 'tau', 'target_entropy', 'num_bins', 'v_max', 'multitask', 'num_tasks', 'num_updates'))
 def _do_multiple_updates(
     rng: PRNGKey,
     actor: Model,
@@ -172,6 +203,7 @@ def _do_multiple_updates(
     num_bins: int,
     v_max: float,
     multitask: bool, 
+    num_tasks: int,
     step: int,    
     num_updates: int
 ):
@@ -190,7 +222,8 @@ def _do_multiple_updates(
             target_entropy,
             num_bins,
             v_max,
-            multitask
+            multitask,
+            num_tasks,
         )
         return step, new_rng, new_actor, new_critic, new_target_critic, new_temp, info
 
@@ -218,6 +251,7 @@ class BRC(object):
         width_actor: int = 256,
         num_bins: int = 101,
         v_max: float = 10.0,
+        task_embedding_norm: str = 'l2',
     ) -> None:
         
         action_dim = actions.shape[-1]
@@ -228,6 +262,7 @@ class BRC(object):
         self.discount = discount
         self.num_bins = num_bins
         self.v_max = v_max
+        self.task_embedding_norm = task_embedding_norm
         
         self.num_tasks = num_tasks
         self.embedding_size = embedding_size
@@ -243,7 +278,16 @@ class BRC(object):
             rng = jax.random.PRNGKey(seed)
             rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
             actor_def = NormalTanhPolicy(action_dim=action_dim, hidden_dims=width_actor)
-            critic_def = Critic(num_tasks=num_tasks, embedding_size=embedding_size, ensemble_size=ensemble_size, hidden_dims=width_critic, depth=2, output_nodes=num_bins, multitask=self.multitask)
+            critic_def = Critic(
+                num_tasks=num_tasks,
+                embedding_size=embedding_size,
+                ensemble_size=ensemble_size,
+                hidden_dims=width_critic,
+                depth=2,
+                output_nodes=num_bins,
+                multitask=self.multitask,
+                task_embedding_norm=task_embedding_norm,
+            )
             actor = Model.create(actor_def, inputs=[actor_key, actor_init], tx=optax.adamw(learning_rate=actor_lr))
             critic = Model.create(critic_def, inputs=[critic_key, observations, actions, task_ids_init], tx=optax.adamw(learning_rate=critic_lr))
             target_critic = Model.create(critic_def, inputs=[critic_key, observations, actions, task_ids_init])
@@ -252,6 +296,9 @@ class BRC(object):
 
         self.init_models = jax.jit(_init_models)
         self.actor, self.critic, self.target_critic, self.temp, self.rng = self.init_models(self.seed)
+        self.normalizer_rng = jax.random.PRNGKey(self.seed + 104729)
+        self.task_entropies = jnp.full((num_tasks,), self.target_entropy, dtype=jnp.float32)
+        self.task_entropy_counts = jnp.zeros((num_tasks,), dtype=jnp.int32)
         self.step = 1
 
     def sample_actions(self, observations: np.ndarray, temperature: float = 1.0):
@@ -276,9 +323,16 @@ class BRC(object):
             self.num_bins,
             self.v_max,
             self.multitask,
+            self.num_tasks,
             self.step,
             num_updates
         )
+        entropy_by_task = info.pop('_entropy_by_task')
+        entropy_counts = info.pop('_entropy_counts_by_task')
+        self.task_entropies = jnp.where(
+            entropy_counts > 0, entropy_by_task, self.task_entropies
+        )
+        self.task_entropy_counts = entropy_counts.astype(jnp.int32)
         self.step = step
         self.rng = rng
         self.actor = actor
@@ -299,11 +353,32 @@ class BRC(object):
                     self.target_entropy,
                     self.num_bins,
                     self.v_max,
-                    self.multitask)
+                    self.multitask,
+                    self.num_tasks)
         return infos
     
     def get_temperature(self):
         return _get_temperature(self.temp)
+
+    def get_task_entropies(self):
+        return self.task_entropies
+
+    def estimate_bootstrap_values(self, next_observations, truncates):
+        """Return host values only when an episode actually hits a time limit."""
+        rng, values = _estimate_bootstrap_values(
+            self.normalizer_rng,
+            self.actor,
+            self.critic,
+            self.target_critic,
+            next_observations,
+            self.task_ids,
+            self.num_bins,
+            self.v_max,
+            self.multitask,
+        )
+        self.normalizer_rng = rng
+        values = np.asarray(values)
+        return np.where(np.asarray(truncates), values, 0.0)
 
     def get_tensor_diagnostics(self, batch: Batch):
         """Return device-resident trees used only at tensor-stat intervals."""
@@ -349,7 +424,13 @@ class BRC(object):
         self.temp.save(f'{path}/temp.msgpack', include_optimizer)
         import pickle
         with open(f'{path}/agent_state.pkl', 'wb') as file:
-            pickle.dump({'step': self.step, 'rng': np.asarray(self.rng)}, file)
+            pickle.dump({
+                'step': self.step,
+                'rng': np.asarray(self.rng),
+                'normalizer_rng': np.asarray(self.normalizer_rng),
+                'task_entropies': np.asarray(self.task_entropies),
+                'task_entropy_counts': np.asarray(self.task_entropy_counts),
+            }, file)
         
     def load(self, path):
         import os
@@ -364,3 +445,12 @@ class BRC(object):
                 state = pickle.load(file)
             self.step = int(state['step'])
             self.rng = jnp.asarray(state['rng'])
+            self.normalizer_rng = jnp.asarray(
+                state.get('normalizer_rng', self.normalizer_rng)
+            )
+            self.task_entropies = jnp.asarray(
+                state.get('task_entropies', self.task_entropies)
+            )
+            self.task_entropy_counts = jnp.asarray(
+                state.get('task_entropy_counts', self.task_entropy_counts)
+            )

@@ -16,6 +16,7 @@ from jaxrl.envs import ParallelEnv
 from jaxrl.experiment import ExperimentRecorder, collect_jax_memory_stats, summarize_tree
 from jaxrl.logger import EpisodeRecorder, get_wandb_video
 from jaxrl.normalizer import RewardNormalizer
+from jaxrl.paper_alignment import resolve_paper_alignment
 from jaxrl.replay_buffer import ParallelReplayBuffer
 from jaxrl.utils import Batch
 
@@ -31,10 +32,32 @@ flags.DEFINE_integer('replay_buffer_size', 1000000, 'Replay buffer capacity per 
 flags.DEFINE_integer('start_training', 5000, 'Number of steps before training starts.')
 flags.DEFINE_string('env_names', 'cheetah-run', 'Environment name or named task group.')
 flags.DEFINE_boolean('log_to_wandb', True, 'Whether to mirror metrics to W&B.')
+flags.DEFINE_string('wandb_name', 'auto', 'W&B display name; auto uses the seed.')
 flags.DEFINE_boolean('offline_evaluation', True, 'Whether to perform deterministic evaluations.')
 flags.DEFINE_boolean('render', True, 'Whether to log evaluation videos.')
 flags.DEFINE_integer('updates_per_step', 2, 'Number of updates per environment step.')
 flags.DEFINE_integer('width_critic', 4096, 'Width of the critic network.')
+flags.DEFINE_boolean(
+    'paper_alignment', False,
+    'Enable the paper-aligned L1/bootstrap/empirical-entropy preset.',
+)
+flags.DEFINE_enum(
+    'task_embedding_norm', 'auto', ['auto', 'l1', 'l2'],
+    'Task embedding norm; auto follows --paper_alignment.',
+)
+flags.DEFINE_enum(
+    'return_bootstrap', 'auto', ['auto', 'reward_mean', 'critic'],
+    'Time-limit return bootstrap; auto follows --paper_alignment.',
+)
+flags.DEFINE_enum(
+    'entropy_correction', 'auto',
+    ['auto', 'target_entropy', 'empirical_per_task'],
+    'Reward-scale entropy correction; auto follows --paper_alignment.',
+)
+flags.DEFINE_enum(
+    'metaworld_reset_mode', 'frozen', ['frozen', 'recreate'],
+    'Keep one MetaWorld rand_vec or reconstruct the task after each episode.',
+)
 
 flags.DEFINE_string('run_root', 'runs', 'Root directory for local experiment data.')
 flags.DEFINE_string('run_id', 'auto', 'Local run id; auto generates one.')
@@ -125,7 +148,14 @@ def main(_):
     if FLAGS.batch_size <= 0 or FLAGS.max_steps <= 0 or FLAGS.replay_buffer_size <= 0:
         raise ValueError('batch_size, max_steps, and replay_buffer_size must be positive')
 
+    resolved_alignment = resolve_paper_alignment(
+        FLAGS.paper_alignment,
+        FLAGS.task_embedding_norm,
+        FLAGS.return_bootstrap,
+        FLAGS.entropy_correction,
+    )
     config = FLAGS.flag_values_dict()
+    config.update({f'resolved_{key}': value for key, value in resolved_alignment.items()})
     env_names = get_environment_list(FLAGS.env_names)
     resume_manifest = None
     resume_checkpoint = None
@@ -142,7 +172,9 @@ def main(_):
         if resume_manifest['task_names'] != env_names:
             raise ValueError('checkpoint task names/order do not match --env_names')
         for key in ['env_names', 'seed', 'width_critic', 'updates_per_step',
-                    'batch_size', 'replay_buffer_size']:
+                    'batch_size', 'replay_buffer_size', 'metaworld_reset_mode',
+                    'resolved_task_embedding_norm', 'resolved_return_bootstrap',
+                    'resolved_entropy_correction']:
             previous = resume_manifest.get('config', {}).get(key)
             current = config.get(key)
             if previous is not None and current is not None and previous != current:
@@ -157,7 +189,7 @@ def main(_):
             entity='',
             project='',
             group=FLAGS.env_names,
-            name=str(FLAGS.seed),
+            name=str(FLAGS.seed) if FLAGS.wandb_name == 'auto' else FLAGS.wandb_name,
         )
         if wandb_resume_id:
             init_kwargs.update(id=wandb_resume_id, resume='allow')
@@ -193,8 +225,14 @@ def main(_):
     normal_exit = False
     initialization_start = time.perf_counter()
     try:
-        env = ParallelEnv(env_names, seed=FLAGS.seed)
-        eval_env = ParallelEnv(env_names, seed=FLAGS.seed + 42) if FLAGS.offline_evaluation else None
+        env = ParallelEnv(
+            env_names, seed=FLAGS.seed,
+            metaworld_reset_mode=FLAGS.metaworld_reset_mode,
+        )
+        eval_env = ParallelEnv(
+            env_names, seed=FLAGS.seed + 42,
+            metaworld_reset_mode=FLAGS.metaworld_reset_mode,
+        ) if FLAGS.offline_evaluation else None
         num_tasks = len(env.envs)
         agent = BRC(
             FLAGS.seed,
@@ -203,6 +241,7 @@ def main(_):
             num_tasks=num_tasks,
             updates_per_step=FLAGS.updates_per_step,
             width_critic=FLAGS.width_critic,
+            task_embedding_norm=resolved_alignment['task_embedding_norm'],
         )
         resource_devices = tuple(jax.devices())
         replay_buffer = ParallelReplayBuffer(
@@ -212,7 +251,11 @@ def main(_):
             num_tasks=num_tasks,
         )
         reward_normalizer = RewardNormalizer(
-            num_tasks, target_entropy=agent.target_entropy, discount=agent.discount
+            num_tasks,
+            target_entropy=agent.target_entropy,
+            discount=agent.discount,
+            return_bootstrap=resolved_alignment['return_bootstrap'],
+            entropy_correction=resolved_alignment['entropy_correction'],
         )
         episode_recorder = EpisodeRecorder(num_tasks, env_names)
         checkpoint_manager = CheckpointManager(
@@ -278,10 +321,29 @@ def main(_):
             if profiling:
                 profile['env_step_sec'] = time.perf_counter() - start
 
-            reward_normalizer.update(rewards, terms, truns)
+            bootstrap_values = None
+            bootstrap_values_normalized = None
+            if resolved_alignment['return_bootstrap'] == 'critic' and np.any(truns):
+                bootstrap_values_normalized = agent.estimate_bootstrap_values(
+                    next_observations, truns
+                )
+                bootstrap_values = reward_normalizer.denormalize_values(
+                    bootstrap_values_normalized,
+                    agent.get_temperature(),
+                    agent.get_task_entropies(),
+                )
+            reward_normalizer.update(
+                rewards, terms, truns, bootstrap_values=bootstrap_values
+            )
             events = episode_recorder.update(rewards, goals, terms, truns, env_step=i)
             for event in events:
                 event['episode_wall_time_sec'] = recorder.wall_time_sec
+                if bootstrap_values is not None:
+                    task_id = event['task_id']
+                    event['return_bootstrap_normalized'] = float(
+                        bootstrap_values_normalized[task_id]
+                    )
+                    event['return_bootstrap_raw'] = float(bootstrap_values[task_id])
             recorder.queue_episode_events(events)
             episode_recorder.drain_events()
             masks = env.generate_masks(terms, truns)
@@ -292,8 +354,12 @@ def main(_):
             if i >= FLAGS.start_training:
                 start = time.perf_counter()
                 batches = replay_buffer.sample(FLAGS.batch_size, FLAGS.updates_per_step)
-                batches = reward_normalizer.normalize(batches, agent.get_temperature())
-                latest_normalized_rewards = np.asarray(batches.rewards)
+                batches = reward_normalizer.normalize(
+                    batches,
+                    agent.get_temperature(),
+                    task_entropies=agent.get_task_entropies(),
+                )
+                latest_normalized_rewards = batches.rewards
                 if profiling:
                     profile['replay_sample_sec'] = time.perf_counter() - start
 
@@ -346,6 +412,12 @@ def main(_):
                     'jit_and_first_update_sec': first_update_sec if first_update_sec is not None else np.nan,
                     **collect_jax_memory_stats(resource_devices),
                 }
+                train_metrics.update(reward_normalizer.diagnostics(
+                    agent.get_temperature(), agent.get_task_entropies()
+                ))
+                train_metrics['task_entropy_batch_count_by_task'] = np.asarray(
+                    agent.task_entropy_counts
+                )
                 if latest_normalized_rewards is not None:
                     train_metrics.update(
                         reward_normalized_mean=float(np.mean(latest_normalized_rewards)),
@@ -416,7 +488,9 @@ def main(_):
                         )
                         _save_probe_batch(probe_path, probe_batch)
                     normalized_probe = reward_normalizer.normalize(
-                        probe_batch, agent.get_temperature()
+                        probe_batch,
+                        agent.get_temperature(),
+                        task_entropies=agent.get_task_entropies(),
                     )
                     diagnostic_trees = agent.get_tensor_diagnostics(normalized_probe)
                     tensor_stats = {}

@@ -223,7 +223,9 @@ class CheckpointManager:
         if manifest["task_names"] != self.task_names:
             raise ValueError("checkpoint task names/order do not match the current run")
         for key in ["env_names", "seed", "width_critic", "updates_per_step",
-                    "batch_size", "replay_buffer_size"]:
+                    "batch_size", "replay_buffer_size", "metaworld_reset_mode",
+                    "resolved_task_embedding_norm", "resolved_return_bootstrap",
+                    "resolved_entropy_correction"]:
             old = manifest.get("config", {}).get(key)
             new = self.config.get(key)
             if old is not None and new is not None and old != new:
