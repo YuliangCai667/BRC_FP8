@@ -71,6 +71,8 @@ class MetaWorldResetProtocolTest(unittest.TestCase):
             checkpoint_config_value({'metaworld_reset_mode': 'resample'}, 'metaworld_reset_mode'),
             'resample',
         )
+        self.assertEqual(checkpoint_config_value({}, 'eval_seed_offset'), 42)
+        self.assertEqual(checkpoint_config_value({'eval_seed_offset': 0}, 'eval_seed_offset'), 0)
 
 
 if __name__ == '__main__':

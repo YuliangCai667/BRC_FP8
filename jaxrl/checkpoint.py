@@ -18,9 +18,11 @@ CHECKPOINT_SCHEMA_VERSION = 1
 
 
 def checkpoint_config_value(config: Mapping[str, Any], key: str):
-    """Interpret missing reset mode in historical checkpoints as frozen."""
+    """Interpret protocol fields missing from historical checkpoints."""
     if key == "metaworld_reset_mode":
         return config.get(key, "frozen")
+    if key == "eval_seed_offset":
+        return config.get(key, 42)
     return config.get(key)
 
 
@@ -230,7 +232,8 @@ class CheckpointManager:
         if manifest["task_names"] != self.task_names:
             raise ValueError("checkpoint task names/order do not match the current run")
         for key in ["env_names", "seed", "width_critic", "updates_per_step",
-                    "batch_size", "replay_buffer_size", "metaworld_reset_mode"]:
+                    "batch_size", "replay_buffer_size", "metaworld_reset_mode",
+                    "eval_seed_offset"]:
             old = checkpoint_config_value(manifest.get("config", {}), key)
             new = checkpoint_config_value(self.config, key)
             if old is not None and new is not None and old != new:

@@ -23,6 +23,10 @@ from jaxrl.utils import Batch
 FLAGS = flags.FLAGS
 
 flags.DEFINE_integer('seed', 0, 'Random seed.')
+flags.DEFINE_integer(
+    'eval_seed_offset', 0,
+    'Offset added to --seed for the independent evaluation environment.',
+)
 flags.DEFINE_integer('eval_episodes', 10, 'Number of episodes used for evaluation.')
 flags.DEFINE_integer('eval_interval', 50000, 'Eval interval.')
 flags.DEFINE_integer('batch_size', 1024, 'Mini batch size.')
@@ -147,7 +151,8 @@ def main(_):
         if resume_manifest['task_names'] != env_names:
             raise ValueError('checkpoint task names/order do not match --env_names')
         for key in ['env_names', 'seed', 'width_critic', 'updates_per_step',
-                    'batch_size', 'replay_buffer_size', 'metaworld_reset_mode']:
+                    'batch_size', 'replay_buffer_size', 'metaworld_reset_mode',
+                    'eval_seed_offset']:
             previous = checkpoint_config_value(
                 resume_manifest.get('config', {}), key
             )
@@ -205,7 +210,7 @@ def main(_):
             metaworld_reset_mode=FLAGS.metaworld_reset_mode,
         )
         eval_env = ParallelEnv(
-            env_names, seed=FLAGS.seed + 42,
+            env_names, seed=FLAGS.seed + FLAGS.eval_seed_offset,
             metaworld_reset_mode=FLAGS.metaworld_reset_mode,
         ) if FLAGS.offline_evaluation else None
         num_tasks = len(env.envs)
