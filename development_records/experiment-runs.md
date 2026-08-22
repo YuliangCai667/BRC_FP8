@@ -11,12 +11,14 @@
 | 2026-08-21 | `0108ohl7` | 完成 | 原始 BRC，固定 MetaWorld 配置 | 123 / GPU 3 | 同上 | 最后 0.40；最好 0.50；末 3 次均值 0.37 |
 | 2026-08-22 | `lwyfe3mv` | 运行中 | 原始 BRC，reset 重采样 | 42 / GPU 1 | `codex/experiment-recorder` @ `9891def` | 尚未到首次 eval（记录时 step 8,000） |
 | 2026-08-22 | `ahg3l20l` | 运行中 | 论文对齐 BRC，reset 重采样 | 42 / GPU 2 | `codex/paper-alignment` @ `c41d510` | 尚未到首次 eval（记录时 step 7,000） |
-| 2026-08-22 | `jvboukld` | 运行中 | DMC Dogs 四任务联合训练，原始 BRC | 42 / GPU 0 | `codex/experiment-recorder` @ `9891def` | 尚未到首次 eval（记录时 step 4,000） |
-| 2026-08-22 | `de2aug47` | 运行中 | DMC Dogs 四任务联合训练，论文对齐 BRC | 42 / GPU 3 | `codex/paper-alignment` @ `c41d510` | 尚未到首次 eval（记录时 step 4,000） |
+| 2026-08-22 | `jvboukld` | 完成 | DMC Dogs 四任务联合训练，原始 BRC | 42 / GPU 0 | `codex/experiment-recorder` @ `9891def` | 最后 eval return 776.4 |
+| 2026-08-22 | `de2aug47` | 完成 | DMC Dogs 四任务联合训练，旧论文对齐 BRC（critic bootstrap） | 42 / GPU 3 | `codex/paper-alignment` @ `c41d510` | 最后 eval return 626.4 |
 | 2026-08-23 | `ablation_bootstrap_only_s42_20260823` | 完成 | DMC Dogs 25k 消融：只改 critic bootstrap | 42 / GPU 1 | `codex/paper-alignment` @ `c41d510` | eval 关闭；25k train return 20.1；用于诊断尺度反馈 |
 | 2026-08-23 | `validation_reward_mean_gbar_s42_20260823` | 完成 | DMC Dogs 10k 验证：paper preset 改用 reward-mean `Gbar` | 42 / GPU 1 | 运行时 `c41d510` + 修改，后固化为 `9295a2d` | eval 关闭；10k train return 13.3；`Gbar` 约 6–19 |
-| 待 Dogs 完成 | `dmc_humanoids_original_s42_20260822` | 排队 | DMC Humanoids 三任务联合训练，原始 BRC | 42 / GPU 0 | 训练代码与 `e3a41da` 一致 | Dogs 正常到 500k 后启动 |
-| 待 Dogs 完成 | `dmc_humanoids_paper_s42_20260822` | 排队 | DMC Humanoids 三任务联合训练，论文对齐 BRC | 42 / GPU 3 | `codex/paper-alignment` @ `c41d510` | Dogs 正常到 500k 后启动 |
+| 2026-08-22 | `dmc_humanoids_original_s42_20260822` | 运行中 | DMC Humanoids 三任务联合训练，原始 BRC | 42 / GPU 0 | 训练代码与 `e3a41da` 一致 | 正常接力启动，继续运行 |
+| 2026-08-22 | `dmc_humanoids_paper_s42_20260822` | 主动停止 | DMC Humanoids，旧论文对齐 BRC（critic bootstrap） | 42 / GPU 3 | `codex/paper-alignment` @ `c41d510` | step 133k；125k eval return 3.61 |
+| 2026-08-23 | `dmc_dogs_rewardmean_paper_s42_20260823` / `ttb7gnbz` | 运行中 | DMC Dogs，稳定化论文对齐 BRC | 42 / GPU 3 | `codex/paper-alignment` @ `9295a2d` | 正式 500k；完成后自动接 Humanoids |
+| Dogs 完成后 | `dmc_humanoids_rewardmean_paper_s42_20260823` | 排队 | DMC Humanoids，稳定化论文对齐 BRC | 42 / GPU 3 | `codex/paper-alignment` @ `9295a2d` | 仅 Dogs 正常退出后启动 |
 
 ## 已完成：原始 BRC 三种子基线
 
@@ -68,7 +70,7 @@ env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 PATH=/usr/local/cuda-12.8/
 env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 PATH=/usr/local/cuda-12.8/bin:$PATH CUDA_VISIBLE_DEVICES=2 XLA_PYTHON_CLIENT_PREALLOCATE=false python3 train.py --env_names=METAWORLD_ALL --seed=42 --eval_seed_offset=0 --max_steps=500000 --start_training=5000 --replay_buffer_size=1000000 --batch_size=1024 --updates_per_step=2 --width_critic=4096 --eval_interval=25000 --eval_episodes=10 --metaworld_reset_mode=resample --paper_alignment=true --offline_evaluation=true --render=false --log_to_wandb=true --wandb_name=BRC-paper-aligned-resample-seed42
 ```
 
-## 运行中：DMC Dogs 四任务联合训练
+## 已完成：DMC Dogs 四任务联合训练
 
 任务集合为 `dog-stand`、`dog-walk`、`dog-trot`、`dog-run`。四个环境并行交互，500,000 env steps 指每个任务的步数，对应总计 2,000,000 transitions。两次实验均为 seed 42，训练和 eval 环境使用相同初始 seed、独立 RNG；记录器和默认 checkpoint 策略均开启。DMC 没有 MetaWorld 式 success 指标，命令行中的 `success=0` 不用于判断效果；比较 eval return，论文汇总口径为 return / 1000。
 
@@ -123,11 +125,11 @@ env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 PATH=/usr/local/cuda-12.8/
 - 配置：L1 task embedding、reward-mean return scale、per-task empirical entropy；10,000 步，关闭 eval、checkpoint、profiling 和 tensor stats。
 - 结果：step 8,000 后 critic Q 仍饱和约 10，但 `Gbar` 到 step 10,000 仅为 `[19.1, 16.8, 11.0, 5.7]`；旧 critic-bootstrap + empirical-entropy 同期约为 `[294.6, 284.8, 287.3, 287.2]`。验证了尺度解耦，不代表最终性能结论。
 
-## 排队：DMC Humanoids 三任务联合训练
+## DMC Humanoids：original 运行中，旧 paper 主动停止
 
 任务集合为 `humanoid-stand`、`humanoid-walk`、`humanoid-run`。Figure 16 的 DMC-Hard 结果由 Dogs 4-task MT 和 Humanoids 3-task MT 的共 7 个任务聚合得到，并非单个 agent 混合训练两种 embodiment。以下接力任务只在对应 Dogs run 写入 `run_finished` 且达到 500,000 步后启动；Dogs 异常退出或训练代码发生变化时不会启动。
 
-### 原始 BRC（排队）
+### 原始 BRC（运行中）
 
 - tmux：`brc_dmc_humanoids_old_queue`
 - GPU：0
@@ -138,7 +140,7 @@ env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 PATH=/usr/local/cuda-12.8/
 env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 PATH=/usr/local/cuda-12.8/bin:$PATH CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false python3 train.py --env_names=DMC_HUMANOIDS --seed=42 --eval_seed_offset=0 --max_steps=500000 --start_training=5000 --replay_buffer_size=1000000 --batch_size=1024 --updates_per_step=2 --width_critic=4096 --eval_interval=25000 --eval_episodes=10 --offline_evaluation=true --render=false --log_to_wandb=true --wandb_name=BRC-DMC-HUMANOIDS-original-seed42 --run_root=runs --run_id=dmc_humanoids_original_s42_20260822 --metrics_interval=1000 --metrics_flush_interval=1000 --system_metrics_interval_sec=10 --profile_interval=25000 --profile_window=10 --tensor_stats_interval=25000 --analysis_checkpoint_interval=50000 --recovery_checkpoint_interval=100000 --keep_last_analysis_checkpoints=2 --keep_last_recovery_checkpoints=1 --save_replay_buffer=true
 ```
 
-### 论文对齐 BRC（排队）
+### 旧论文对齐 BRC（step 133k 主动停止）
 
 - tmux：`brc_dmc_humanoids_paper_queue`
 - GPU：3
@@ -155,6 +157,14 @@ env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 PATH=/usr/local/cuda-12.8/
 tmux attach -t brc_dmc_humanoids_old_queue
 tmux attach -t brc_dmc_humanoids_paper_queue
 ```
+
+## 替换链：reward-mean `Gbar` Dogs → Humanoids
+
+- 启动：2026-08-23 01:04；tmux `brc_dmc_paper_rewardmean_s42`；GPU 3；seed 42。
+- 版本：`codex/paper-alignment` @ `9295a2d`；实际解析为 L1 task embedding、reward-mean return scale、per-task empirical entropy。
+- Dogs：[W&B `ttb7gnbz`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/ttb7gnbz)，本地 run ID `dmc_dogs_rewardmean_paper_s42_20260823`。
+- Humanoids 本地 run ID `dmc_humanoids_rewardmean_paper_s42_20260823`；Dogs 以退出码 0 完成 500k 后立即启动，Dogs 异常退出则不启动。
+- 两段均使用正式配置：500k steps、start training 5k、buffer 1M、batch 1024、2 updates/step、critic width 4096、每 25k 步评估 10 episodes，并启用完整 recorder/checkpoint 策略。
 
 ## 更新规则
 
