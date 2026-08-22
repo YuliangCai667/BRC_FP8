@@ -13,6 +13,7 @@
 | 2026-08-22 | `ahg3l20l` | 运行中 | 论文对齐 BRC，reset 重采样 | 42 / GPU 2 | `codex/paper-alignment` @ `c41d510` | 尚未到首次 eval（记录时 step 7,000） |
 | 2026-08-22 | `jvboukld` | 运行中 | DMC Dogs 四任务联合训练，原始 BRC | 42 / GPU 0 | `codex/experiment-recorder` @ `9891def` | 尚未到首次 eval（记录时 step 4,000） |
 | 2026-08-22 | `de2aug47` | 运行中 | DMC Dogs 四任务联合训练，论文对齐 BRC | 42 / GPU 3 | `codex/paper-alignment` @ `c41d510` | 尚未到首次 eval（记录时 step 4,000） |
+| 2026-08-23 | `ablation_bootstrap_only_s42_20260823` | 完成 | DMC Dogs 25k 消融：只改 critic bootstrap | 42 / GPU 1 | `codex/paper-alignment` @ `c41d510` | eval 关闭；25k train return 20.1；用于诊断尺度反馈 |
 | 待 Dogs 完成 | `dmc_humanoids_original_s42_20260822` | 排队 | DMC Humanoids 三任务联合训练，原始 BRC | 42 / GPU 0 | 训练代码与 `e3a41da` 一致 | Dogs 正常到 500k 后启动 |
 | 待 Dogs 完成 | `dmc_humanoids_paper_s42_20260822` | 排队 | DMC Humanoids 三任务联合训练，论文对齐 BRC | 42 / GPU 3 | `codex/paper-alignment` @ `c41d510` | Dogs 正常到 500k 后启动 |
 
@@ -100,6 +101,19 @@ env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 PATH=/usr/local/cuda-12.8/
 tmux attach -t brc_dmc_dogs_old_s42
 tmux attach -t brc_dmc_dogs_paper_s42
 ```
+
+## 已完成：critic bootstrap 单因素消融
+
+- 时间：2026-08-23 00:03–00:23；GPU 1，与原有进程共享 GPU，未中断原任务。
+- W&B：[BRC-ablation-DMC-DOGS-bootstrap-only-seed42](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/5mwzsn67)
+- 对照：保留原版 L2 task embedding 与 target-entropy correction，仅将 time-limit return bootstrap 从 `reward_mean` 改为 `critic`。
+- 为降低成本，运行 25,000 步，关闭 eval、profiling、tensor stats 和 checkpoint；保留每 1,000 步训练指标及资源记录。
+
+```bash
+env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 PATH=/usr/local/cuda-12.8/bin:$PATH CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false python3 train.py --env_names=DMC_DOGS --seed=42 --eval_seed_offset=0 --max_steps=25000 --start_training=5000 --replay_buffer_size=50000 --batch_size=1024 --updates_per_step=2 --width_critic=4096 --paper_alignment=false --task_embedding_norm=l2 --return_bootstrap=critic --entropy_correction=target_entropy --offline_evaluation=false --eval_interval=25000 --eval_episodes=10 --render=false --log_to_wandb=true --wandb_name=BRC-ablation-DMC-DOGS-bootstrap-only-seed42 --run_root=runs --run_id=ablation_bootstrap_only_s42_20260823 --metrics_interval=1000 --metrics_flush_interval=1000 --system_metrics_interval_sec=10 --profile_interval=0 --tensor_stats_interval=0 --analysis_checkpoint_interval=0 --recovery_checkpoint_interval=0 --keep_last_analysis_checkpoints=0 --keep_last_recovery_checkpoints=0 --save_replay_buffer=false
+```
+
+关键观察：critic bootstrap 在 step 7,000 已达到归一化支持上界约 10，使每任务 `Gbar` 从 step 6,000 的约 29–33 扩张到 step 10,000 的约 105–109，25,000 时约 113–116；同期真实 episode return 仍远低于该尺度。25,000 步的 train return 为：original 64.1、bootstrap-only 20.1、完整 paper-aligned 18.9。单种子短跑表明 bootstrap 是尺度反馈的主要触发器，经验熵修正会进一步放大该反馈；不能据此替代完整多种子最终性能比较。
 
 ## 排队：DMC Humanoids 三任务联合训练
 
