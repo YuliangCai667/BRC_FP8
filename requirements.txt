@@ -1,8 +1,8 @@
 numpy==1.26.4
 scipy==1.12.0
-jax[cuda12_pip]==0.4.35 
--f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-flax
+jax[cuda12]==0.6.0
+flax==0.10.4
+optax==0.2.5
 imageio
 wandb
 wandb[media]

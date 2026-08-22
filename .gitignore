@@ -5,3 +5,4 @@ __pycache__/
 # Runtime experiment artifacts; local files are the authoritative run data.
 runs/
 wandb/
+MUJOCO_LOG.TXT

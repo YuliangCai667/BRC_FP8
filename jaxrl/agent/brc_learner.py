@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from flax import traverse_util
 
 from jaxrl.agent.update import (
     build_actor_input,
@@ -38,7 +39,7 @@ def _get_infos(
 ):
     rng, actor_key, critic_key = jax.random.split(rng, 3)
     _, critic_info = update_critic(critic_key, actor, critic, target_critic, temp, batch, discount, num_bins, v_max, multitask)
-    _, actor_info = update_actor(
+    _, _, actor_info = update_actor(
         actor_key, actor, critic, temp, batch, num_bins, v_max, multitask, num_tasks
     )
     _, alpha_info = update_temperature(temp, actor_info['entropy'], target_entropy)
@@ -135,10 +136,10 @@ def _get_forward_diagnostics(actor, critic, batch, multitask):
     policy = actor(actor_inputs)
     q_logits = critic(batch.observations, batch.actions, batch.task_ids)
     _, actor_intermediates = actor.apply_fn.apply(
-        {'params': actor.params}, actor_inputs, mutable=['intermediates']
+        actor.variables(), actor_inputs, mutable=['intermediates']
     )
     _, critic_intermediates = critic.apply_fn.apply(
-        {'params': critic.params},
+        critic.variables(),
         batch.observations,
         batch.actions,
         batch.task_ids,
@@ -179,7 +180,7 @@ def _update(
     rng, actor_key, critic_key = jax.random.split(rng, 3)
     new_critic, critic_info = update_critic(critic_key, actor, critic, target_critic, temp, batch, discount, num_bins, v_max, multitask)
     new_target_critic = update_target_critic(new_critic, target_critic, tau)
-    new_actor, actor_info = update_actor(
+    new_actor, new_critic, actor_info = update_actor(
         actor_key, actor, new_critic, temp, batch, num_bins, v_max, multitask, num_tasks
     )
     new_temp, alpha_info = update_temperature(temp, actor_info['entropy'], target_entropy)
@@ -252,6 +253,8 @@ class BRC(object):
         num_bins: int = 101,
         v_max: float = 10.0,
         task_embedding_norm: str = 'l2',
+        critic_precision: str = 'fp32',
+        fp8_amax_history_length: int = 1024,
     ) -> None:
         
         action_dim = actions.shape[-1]
@@ -263,6 +266,8 @@ class BRC(object):
         self.num_bins = num_bins
         self.v_max = v_max
         self.task_embedding_norm = task_embedding_norm
+        self.critic_precision = critic_precision
+        self.fp8_amax_history_length = fp8_amax_history_length
         
         self.num_tasks = num_tasks
         self.embedding_size = embedding_size
@@ -287,10 +292,23 @@ class BRC(object):
                 output_nodes=num_bins,
                 multitask=self.multitask,
                 task_embedding_norm=task_embedding_norm,
+                critic_precision=critic_precision,
+                fp8_amax_history_length=fp8_amax_history_length,
+            )
+            target_critic_def = Critic(
+                num_tasks=num_tasks,
+                embedding_size=embedding_size,
+                ensemble_size=ensemble_size,
+                hidden_dims=width_critic,
+                depth=2,
+                output_nodes=num_bins,
+                multitask=self.multitask,
+                task_embedding_norm=task_embedding_norm,
+                critic_precision='fp32',
             )
             actor = Model.create(actor_def, inputs=[actor_key, actor_init], tx=optax.adamw(learning_rate=actor_lr))
             critic = Model.create(critic_def, inputs=[critic_key, observations, actions, task_ids_init], tx=optax.adamw(learning_rate=critic_lr))
-            target_critic = Model.create(critic_def, inputs=[critic_key, observations, actions, task_ids_init])
+            target_critic = Model.create(target_critic_def, inputs=[critic_key, observations, actions, task_ids_init])
             temp = Model.create(Temperature(init_temperature), inputs=[temp_key], tx=optax.adam(learning_rate=temp_lr, b1=0.5))
             return actor, critic, target_critic, temp, rng
 
@@ -397,7 +415,7 @@ class BRC(object):
             self.v_max,
             self.multitask,
         )
-        return {
+        diagnostics = {
             'params': {
                 'actor': self.actor.params,
                 'critic': self.critic.params,
@@ -412,6 +430,32 @@ class BRC(object):
             'gradients': gradients,
             **forward,
         }
+        if self.critic.fp8_meta is not None:
+            diagnostics['fp8'] = self._fp8_diagnostics()
+        return diagnostics
+
+    def _fp8_diagnostics(self):
+        flat_meta = traverse_util.flatten_dict(self.critic.fp8_meta, sep='/')
+        fp8_max = {
+            'input': jnp.asarray(jnp.finfo(jnp.float8_e4m3fn).max, jnp.float32),
+            'kernel': jnp.asarray(jnp.finfo(jnp.float8_e4m3fn).max, jnp.float32),
+            'output_grad': jnp.asarray(jnp.finfo(jnp.float8_e5m2).max, jnp.float32),
+        }
+        diagnostics = {}
+        for path, history in flat_meta.items():
+            if not path.endswith('_amax_history'):
+                continue
+            kind = path.rsplit('/', 1)[-1].removesuffix('_amax_history')
+            layer_path = path.rsplit('/', 1)[0]
+            scale = flat_meta[f'{layer_path}/{kind}_scale'][..., 0]
+            current_amax = history[..., 0]
+            diagnostics[f'{layer_path}/{kind}'] = {
+                'scale': scale,
+                'current_amax': current_amax,
+                'history_amax': jnp.max(history, axis=-1),
+                'saturation_risk_ratio': current_amax / (fp8_max[kind] * scale),
+            }
+        return diagnostics
 
     def reset(self):
         self.step = 1

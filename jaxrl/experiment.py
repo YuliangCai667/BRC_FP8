@@ -452,6 +452,7 @@ class ExperimentRecorder:
                 versions[package] = importlib.metadata.version(package)
             except importlib.metadata.PackageNotFoundError:
                 pass
+        ptxas_path = shutil.which("ptxas")
         metadata = {
             "schema_version": SCHEMA_VERSION, "run_id": self.run_id,
             "created_at": time.time(), "command": " ".join(shlex.quote(arg) for arg in sys.argv),
@@ -460,6 +461,12 @@ class ExperimentRecorder:
             "seed": self.seed, "git_commit": safe_command(["git", "rev-parse", "HEAD"]),
             "git_status": safe_command(["git", "status", "--short"]),
             "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"), "config": jsonable(config),
+            "cuda_environment": {
+                "CUDA_ROOT": os.environ.get("CUDA_ROOT"),
+                "CUDA_HOME": os.environ.get("CUDA_HOME"),
+                "ptxas_path": ptxas_path,
+                "ptxas_version": safe_command([ptxas_path, "--version"]) if ptxas_path else None,
+            },
             "jax_memory_environment": {
                 "XLA_PYTHON_CLIENT_PREALLOCATE": os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE"),
                 "XLA_PYTHON_CLIENT_ALLOCATOR": os.environ.get("XLA_PYTHON_CLIENT_ALLOCATOR"),

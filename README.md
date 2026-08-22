@@ -45,6 +45,27 @@ synchronization boundary. For FP32/FP8 memory comparisons, use the same allocato
 settings for both runs; `XLA_PYTHON_CLIENT_PREALLOCATE=false` makes the physical
 device metric easier to interpret.
 
+## Blackwell FP8 critic training
+
+The online critic can run the four Dense layers inside its two residual blocks
+with native FP8 matrix multiplication. Input/output projections, LayerNorm,
+the target critic, master parameters, and optimizer state remain FP32. Use
+`--critic_precision=fp8_direct`; per-tensor scaling uses a 1,024-entry amax
+history by default.
+
+For the paper-aligned MetaWorld configuration, run:
+
+```bash
+scripts/run_metaworld_fp8_direct.sh GPU_ID SEED
+```
+
+The script selects CUDA 12.8 through `CUDA_ROOT`, `CUDA_HOME`, and `PATH`. Start
+it from a shell that does not retain an older CUDA directory in
+`LD_LIBRARY_PATH`. Resuming an FP32 recovery checkpoint in `fp8_direct` mode is
+supported for exploration: optimizer and replay state are restored while FP8
+scales start fresh, and a `precision_transition` event marks the boundary. Such
+a run is not equivalent to FP8 training from initialization.
+
 ## Citation
 
 If you find this repository useful, feel free to cite our paper using the following bibtex.

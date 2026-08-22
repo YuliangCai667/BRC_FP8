@@ -1,6 +1,9 @@
+import functools
 from typing import Callable
+
 import jax.numpy as jnp
 import flax.linen as nn
+from flax.linen.fp8_ops import OVERWRITE_WITH_GRADIENT
 import distrax
 
 def default_init(scale: float = jnp.sqrt(2)):
@@ -9,14 +12,28 @@ def default_init(scale: float = jnp.sqrt(2)):
 class BronetBlock(nn.Module):
     hidden_dims: int
     activations: Callable[[jnp.ndarray], jnp.ndarray]
+    fp8_direct: bool = False
+    fp8_amax_history_length: int = 1024
+
+    def _dense(self):
+        if not self.fp8_direct:
+            return nn.Dense(self.hidden_dims, kernel_init=default_init())
+        return nn.Dense(
+            self.hidden_dims,
+            kernel_init=default_init(),
+            dot_general_cls=functools.partial(
+                nn.Fp8DirectDotGeneralOp,
+                amax_history_length=self.fp8_amax_history_length,
+            ),
+        )
 
     @nn.compact
     def __call__(self, x: jnp.ndarray):
-        res = nn.Dense(self.hidden_dims, kernel_init=default_init())(x)
+        res = self._dense()(x)
         self.sow('intermediates', 'dense_0_output', res)
         res = nn.LayerNorm()(res)
         res = self.activations(res)
-        res = nn.Dense(self.hidden_dims, kernel_init=default_init())(res)
+        res = self._dense()(res)
         self.sow('intermediates', 'dense_1_output', res)
         res = nn.LayerNorm()(res)
         return res + x
@@ -27,6 +44,8 @@ class BroNet(nn.Module):
     add_final_layer: bool = False
     output_nodes: int = 101
     activations: Callable[[jnp.ndarray], jnp.ndarray] = nn.relu
+    fp8_residual_blocks: bool = False
+    fp8_amax_history_length: int = 1024
 
     @nn.compact
     def __call__(self, x: jnp.ndarray):
@@ -35,7 +54,12 @@ class BroNet(nn.Module):
         x = nn.LayerNorm()(x)
         x = self.activations(x)
         for i in range(self.depth):
-            x = BronetBlock(self.hidden_dims, self.activations)(x)
+            x = BronetBlock(
+                self.hidden_dims,
+                self.activations,
+                fp8_direct=self.fp8_residual_blocks,
+                fp8_amax_history_length=self.fp8_amax_history_length,
+            )(x)
         if self.add_final_layer:
             x = nn.Dense(self.output_nodes, kernel_init=default_init())(x)
             self.sow('intermediates', 'final_dense_output', x)
@@ -61,9 +85,19 @@ class QValue(nn.Module):
     depth: int = 2
     activations: Callable[[jnp.ndarray], jnp.ndarray] = nn.relu
     output_nodes: int = 101
+    critic_precision: str = 'fp32'
+    fp8_amax_history_length: int = 1024
     
     def setup(self):
-        self.critic = BroNet(hidden_dims=self.hidden_dims, depth=self.depth, activations=self.activations, add_final_layer=True, output_nodes=self.output_nodes)
+        self.critic = BroNet(
+            hidden_dims=self.hidden_dims,
+            depth=self.depth,
+            activations=self.activations,
+            add_final_layer=True,
+            output_nodes=self.output_nodes,
+            fp8_residual_blocks=self.critic_precision == 'fp8_direct',
+            fp8_amax_history_length=self.fp8_amax_history_length,
+        )
 
     def __call__(self, inputs: jnp.ndarray):
         q_value = self.critic(inputs)
@@ -75,15 +109,27 @@ class QValueEnsemble(nn.Module):
     depth: int = 2
     activations: Callable[[jnp.ndarray], jnp.ndarray] = nn.relu
     output_nodes: int = 101
+    critic_precision: str = 'fp32'
+    fp8_amax_history_length: int = 1024
     
     def setup(self):
+        variable_axes = {'params': 0, 'intermediates': 0}
+        if self.critic_precision == 'fp8_direct':
+            variable_axes[OVERWRITE_WITH_GRADIENT] = 0
         VmapCritic = nn.vmap(QValue,
-                             variable_axes={'params': 0},
+                             variable_axes=variable_axes,
                              split_rngs={'params': True},
                              in_axes=None,
                              out_axes=0,
                              axis_size=self.ensemble_size)
-        self.q_value_ensemble = VmapCritic(hidden_dims=self.hidden_dims, depth=self.depth, activations=self.activations, output_nodes=self.output_nodes)
+        self.q_value_ensemble = VmapCritic(
+            hidden_dims=self.hidden_dims,
+            depth=self.depth,
+            activations=self.activations,
+            output_nodes=self.output_nodes,
+            critic_precision=self.critic_precision,
+            fp8_amax_history_length=self.fp8_amax_history_length,
+        )
 
     def __call__(self, inputs: jnp.ndarray):
         q_values = self.q_value_ensemble(inputs)
@@ -99,6 +145,8 @@ class Critic(nn.Module):
     output_nodes: int = 101
     multitask: bool = False
     task_embedding_norm: str = 'l2'
+    critic_precision: str = 'fp32'
+    fp8_amax_history_length: int = 1024
     
     def setup(self):
         if self.multitask:
@@ -111,6 +159,8 @@ class Critic(nn.Module):
             depth=self.depth,
             activations=self.activations,
             output_nodes=self.output_nodes,
+            critic_precision=self.critic_precision,
+            fp8_amax_history_length=self.fp8_amax_history_length,
         )
 
     def __call__(self, observations: jnp.ndarray, actions: jnp.ndarray, task_ids: jnp.ndarray, return_embeddings: bool = False):

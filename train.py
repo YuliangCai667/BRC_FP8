@@ -10,7 +10,7 @@ import numpy as np
 from absl import app, flags
 
 from jaxrl.agent.brc_learner import BRC
-from jaxrl.checkpoint import CheckpointManager, checkpoint_config_value
+from jaxrl.checkpoint import CheckpointManager, validate_checkpoint_config
 from jaxrl.env_names import get_environment_list
 from jaxrl.envs import ParallelEnv
 from jaxrl.experiment import ExperimentRecorder, collect_jax_memory_stats, summarize_tree
@@ -41,6 +41,14 @@ flags.DEFINE_boolean('offline_evaluation', True, 'Whether to perform determinist
 flags.DEFINE_boolean('render', True, 'Whether to log evaluation videos.')
 flags.DEFINE_integer('updates_per_step', 2, 'Number of updates per environment step.')
 flags.DEFINE_integer('width_critic', 4096, 'Width of the critic network.')
+flags.DEFINE_enum(
+    'critic_precision', 'fp32', ['fp32', 'fp8_direct'],
+    'Precision used by the online critic residual-block Dense layers.',
+)
+flags.DEFINE_integer(
+    'fp8_amax_history_length', 1024,
+    'Per-tensor FP8 amax history length.',
+)
 flags.DEFINE_boolean(
     'paper_alignment', False,
     'Enable L1 and empirical-entropy alignment while keeping reward-mean return-scale estimation.',
@@ -151,6 +159,8 @@ def main(_):
         raise ValueError('--profile_window must be > 0 and smaller than --profile_interval')
     if FLAGS.batch_size <= 0 or FLAGS.max_steps <= 0 or FLAGS.replay_buffer_size <= 0:
         raise ValueError('batch_size, max_steps, and replay_buffer_size must be positive')
+    if FLAGS.fp8_amax_history_length <= 0:
+        raise ValueError('--fp8_amax_history_length must be positive')
 
     resolved_alignment = resolve_paper_alignment(
         FLAGS.paper_alignment,
@@ -166,6 +176,8 @@ def main(_):
     existing_run_dir = None
     requested_run_id = FLAGS.run_id
     wandb_resume_id = None
+    precision_transition = False
+    source_precision = None
 
     if FLAGS.resume_from:
         resume_checkpoint = CheckpointManager.resolve_recovery_checkpoint(FLAGS.resume_from)
@@ -175,17 +187,9 @@ def main(_):
         wandb_resume_id = resume_manifest.get('wandb_id')
         if resume_manifest['task_names'] != env_names:
             raise ValueError('checkpoint task names/order do not match --env_names')
-        for key in ['env_names', 'seed', 'width_critic', 'updates_per_step',
-                    'batch_size', 'replay_buffer_size', 'metaworld_reset_mode',
-                    'eval_seed_offset',
-                    'resolved_task_embedding_norm', 'resolved_return_bootstrap',
-                    'resolved_entropy_correction']:
-            previous = checkpoint_config_value(
-                resume_manifest.get('config', {}), key
-            )
-            current = checkpoint_config_value(config, key)
-            if previous is not None and current is not None and previous != current:
-                raise ValueError(f'checkpoint configuration mismatch for {key}: {previous} != {current}')
+        previous_config = resume_manifest.get('config', {})
+        precision_transition = validate_checkpoint_config(previous_config, config)
+        source_precision = previous_config.get('critic_precision', 'fp32')
 
     wandb_run = None
     wandb_initialization_start = time.perf_counter()
@@ -249,6 +253,8 @@ def main(_):
             updates_per_step=FLAGS.updates_per_step,
             width_critic=FLAGS.width_critic,
             task_embedding_norm=resolved_alignment['task_embedding_norm'],
+            critic_precision=FLAGS.critic_precision,
+            fp8_amax_history_length=FLAGS.fp8_amax_history_length,
         )
         resource_devices = tuple(jax.devices())
         replay_buffer = ParallelReplayBuffer(
@@ -286,6 +292,14 @@ def main(_):
                 checkpoint=str(resume_checkpoint),
                 detail='environment and unfinished trajectories reset; replay/optimizer restored',
             )
+            if precision_transition:
+                recorder.record_event(
+                    'precision_transition', env_step, agent.step,
+                    checkpoint=str(resume_checkpoint),
+                    from_precision=source_precision,
+                    to_precision=FLAGS.critic_precision,
+                    fp8_metadata='initialized_from_defaults',
+                )
 
         observations = env.reset()
         initialization_sec = time.perf_counter() - initialization_start
@@ -412,6 +426,7 @@ def main(_):
                     'action_mean': float(np.mean(actions)),
                     'action_std': float(np.std(actions)),
                     'action_saturation_fraction': float(np.mean(np.abs(actions) >= 0.99)),
+                    'fp8_direct_enabled': float(FLAGS.critic_precision == 'fp8_direct'),
                     'window_train_sec': active_sec,
                     'env_steps_per_sec': active_steps / active_sec,
                     'transitions_per_sec': active_steps * num_tasks / active_sec,

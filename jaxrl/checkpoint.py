@@ -16,6 +16,14 @@ import numpy as np
 
 CHECKPOINT_SCHEMA_VERSION = 1
 
+RESUME_CONFIG_KEYS = [
+    "env_names", "seed", "width_critic", "updates_per_step", "batch_size",
+    "replay_buffer_size", "metaworld_reset_mode", "eval_seed_offset",
+    "resolved_task_embedding_norm", "resolved_return_bootstrap",
+    "resolved_entropy_correction", "critic_precision",
+    "fp8_amax_history_length",
+]
+
 
 def checkpoint_config_value(config: Mapping[str, Any], key: str):
     """Interpret protocol fields missing from historical checkpoints."""
@@ -23,7 +31,33 @@ def checkpoint_config_value(config: Mapping[str, Any], key: str):
         return config.get(key, "frozen")
     if key == "eval_seed_offset":
         return config.get(key, 42)
+    if key == "critic_precision":
+        return config.get(key, "fp32")
+    if key == "fp8_amax_history_length":
+        return config.get(key, 1024)
     return config.get(key)
+
+
+def validate_checkpoint_config(previous: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
+    """Validate resume compatibility and report an FP32-to-FP8 transition."""
+    old_precision = checkpoint_config_value(previous, "critic_precision")
+    new_precision = checkpoint_config_value(current, "critic_precision")
+    precision_transition = old_precision == "fp32" and new_precision == "fp8_direct"
+    if old_precision != new_precision and not precision_transition:
+        raise ValueError(
+            f"checkpoint configuration mismatch for critic_precision: "
+            f"{old_precision} != {new_precision}"
+        )
+    for key in RESUME_CONFIG_KEYS:
+        if key == "critic_precision":
+            continue
+        if key == "fp8_amax_history_length" and old_precision != "fp8_direct":
+            continue
+        old = checkpoint_config_value(previous, key)
+        new = checkpoint_config_value(current, key)
+        if old is not None and new is not None and old != new:
+            raise ValueError(f"checkpoint configuration mismatch for {key}: {old} != {new}")
+    return precision_transition
 
 
 def _tree_nbytes(tree) -> int:
@@ -97,6 +131,7 @@ class CheckpointManager:
     def _agent_bytes(self, agent, include_optimizer: bool):
         models = [agent.actor, agent.critic, agent.target_critic, agent.temp]
         total = sum(_tree_nbytes(model.params) for model in models)
+        total += sum(_tree_nbytes(model.fp8_meta) for model in models)
         if include_optimizer:
             total += sum(_tree_nbytes(model.opt_state) for model in models)
         return total
@@ -134,6 +169,11 @@ class CheckpointManager:
     def _base_manifest(self, kind: str, env_step: int, agent, **fields):
         parameter_dtypes = sorted({str(leaf.dtype) for model in [agent.actor, agent.critic]
                                    for leaf in __import__('jax').tree_util.tree_leaves(model.params)})
+        fp8_metadata_dtypes = sorted({
+            str(leaf.dtype)
+            for model in [agent.actor, agent.critic]
+            for leaf in __import__('jax').tree_util.tree_leaves(model.fp8_meta)
+        })
         return {
             "schema_version": CHECKPOINT_SCHEMA_VERSION,
             "kind": kind,
@@ -144,6 +184,7 @@ class CheckpointManager:
             "run_dir": self.run_dir,
             "task_names": self.task_names,
             "parameter_dtypes": parameter_dtypes,
+            "fp8_metadata_dtypes": fp8_metadata_dtypes,
             "config": self.config,
             **fields,
         }
@@ -231,15 +272,7 @@ class CheckpointManager:
         manifest = self.read_manifest(checkpoint)
         if manifest["task_names"] != self.task_names:
             raise ValueError("checkpoint task names/order do not match the current run")
-        for key in ["env_names", "seed", "width_critic", "updates_per_step",
-                    "batch_size", "replay_buffer_size", "metaworld_reset_mode",
-                    "eval_seed_offset",
-                    "resolved_task_embedding_norm", "resolved_return_bootstrap",
-                    "resolved_entropy_correction"]:
-            old = checkpoint_config_value(manifest.get("config", {}), key)
-            new = checkpoint_config_value(self.config, key)
-            if old is not None and new is not None and old != new:
-                raise ValueError(f"checkpoint configuration mismatch for {key}: {old} != {new}")
+        validate_checkpoint_config(manifest.get("config", {}), self.config)
         agent.load(str(checkpoint))
         with (checkpoint / "training_state.pkl").open("rb") as file:
             state = pickle.load(file)

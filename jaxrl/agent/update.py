@@ -1,7 +1,7 @@
 import functools
 import jax.numpy as jnp
 import jax
-from jaxrl.utils import Batch, Model, Params, PRNGKey, tree_norm
+from jaxrl.utils import Batch, Model, PRNGKey, tree_norm
 
 @functools.partial(jax.jit, static_argnames=('multitask'))
 def build_actor_input(critic: Model, observations: jnp.ndarray, task_ids: jnp.ndarray, multitask: bool):
@@ -13,10 +13,13 @@ def build_actor_input(critic: Model, observations: jnp.ndarray, task_ids: jnp.nd
 
 def update_actor(key: PRNGKey, actor: Model, critic: Model, temp: Model, batch: Batch, num_bins: int, v_max: float, multitask: bool, num_tasks: int):
     inputs = build_actor_input(critic, batch.observations, batch.task_ids, multitask)
-    def actor_loss_fn(actor_params: Params):
-        dist = actor.apply({'params': actor_params}, inputs)        
+    def actor_loss_fn(actor_variables, critic_fp8_meta=None):
+        dist = actor.apply(actor_variables, inputs)
         actions, log_probs = dist.sample_and_log_prob(seed=key)
-        q_logits = critic(batch.observations, actions, batch.task_ids)        
+        critic_variables = critic.variables(fp8_meta=critic_fp8_meta)
+        q_logits = critic.apply(
+            critic_variables, batch.observations, actions, batch.task_ids
+        )
         q_probs = jax.nn.softmax(q_logits, axis=-1).mean(axis=0)
         bin_values = jnp.linspace(start=-v_max, stop=v_max, num=num_bins)[None]
         q_values = (bin_values * q_probs).sum(-1)    
@@ -32,11 +35,20 @@ def update_actor(key: PRNGKey, actor: Model, critic: Model, temp: Model, batch: 
             'entropy': entropy_samples.mean(),
             '_entropy_by_task': entropy_by_task,
             '_entropy_counts_by_task': entropy_counts,
-            'actor_pnorm': tree_norm(actor_params),
+            'actor_pnorm': tree_norm(actor_variables['params']),
         }
-    new_actor, info = actor.apply_gradient(actor_loss_fn)
+    if critic.fp8_meta is None:
+        new_actor, info = actor.apply_gradient(actor_loss_fn)
+        new_critic = critic
+    else:
+        grad_fn = jax.grad(actor_loss_fn, argnums=(0, 1), has_aux=True)
+        (actor_grads, new_fp8_meta), info = grad_fn(
+            actor.variables(), critic.fp8_meta
+        )
+        new_actor, info = actor.apply_variable_gradients(actor_grads, info)
+        new_critic = critic.replace(fp8_meta=new_fp8_meta)
     info['actor_gnorm'] = info.pop('grad_norm')
-    return new_actor, info
+    return new_actor, new_critic, info
 
 def update_critic(key: PRNGKey, actor: Model, critic: Model, target_critic: Model,
            temp: Model, batch: Batch, discount: float, num_bins: int, v_max: float, multitask: bool):
@@ -62,8 +74,10 @@ def update_critic(key: PRNGKey, actor: Model, critic: Model, target_critic: Mode
     
     target_probs = jax.lax.stop_gradient(jnp.sum(lower_values * lower_mask + upper_values * upper_mask, axis=1))
     q_value_target = (bin_values * target_probs).sum(-1)
-    def critic_loss_fn(critic_params: Params):
-        q_logits = critic.apply({"params": critic_params}, batch.observations, batch.actions, batch.task_ids)
+    def critic_loss_fn(critic_variables):
+        q_logits = critic.apply(
+            critic_variables, batch.observations, batch.actions, batch.task_ids
+        )
         q_logprobs = jax.nn.log_softmax(q_logits, axis=-1)
         q_prediction = (bin_values * jnp.exp(q_logprobs)).sum(-1)
         critic_loss = -(target_probs[None] * q_logprobs).sum(-1).mean(-1).sum(-1)
@@ -78,7 +92,7 @@ def update_critic(key: PRNGKey, actor: Model, critic: Model, target_critic: Mode
             "q_prediction_max": q_prediction.max(),
             "q_prediction_std": q_prediction.std(),
             "r": batch.rewards.mean(),
-            "critic_pnorm": tree_norm(critic_params),
+            "critic_pnorm": tree_norm(critic_variables['params']),
         }
     new_critic, info = critic.apply_gradient(critic_loss_fn)
     info["critic_gnorm"] = info.pop("grad_norm")
@@ -91,8 +105,8 @@ def update_target_critic(critic: Model, target_critic: Model, tau: float):
     return target_critic.replace(params=new_target_params)
 
 def update_temperature(temp: Model, entropy: float, target_entropy: float):
-    def temperature_loss_fn(temp_params):
-        temperature = temp.apply({'params': temp_params})
+    def temperature_loss_fn(temp_variables):
+        temperature = temp.apply(temp_variables)
         temp_loss = temperature * (entropy - target_entropy).mean()
         return temp_loss, {'temperature': temperature, 'temp_loss': temp_loss}
     new_temp, info = temp.apply_gradient(temperature_loss_fn)
@@ -113,8 +127,8 @@ def get_actor_gradients(
     """Compute actor gradients for low-frequency numerical diagnostics."""
     inputs = build_actor_input(critic, batch.observations, batch.task_ids, multitask)
 
-    def loss_fn(actor_params: Params):
-        dist = actor.apply({'params': actor_params}, inputs)
+    def loss_fn(actor_variables):
+        dist = actor.apply(actor_variables, inputs)
         actions, log_probs = dist.sample_and_log_prob(seed=key)
         q_logits = critic(batch.observations, actions, batch.task_ids)
         q_probs = jax.nn.softmax(q_logits, axis=-1).mean(axis=0)
@@ -122,7 +136,7 @@ def get_actor_gradients(
         q_values = (bin_values * q_probs).sum(-1)
         return (log_probs * temp().mean() - q_values).mean()
 
-    return jax.grad(loss_fn)(actor.params)
+    return jax.grad(loss_fn)(actor.variables())['params']
 
 
 def get_critic_gradients(
@@ -162,14 +176,14 @@ def get_critic_gradients(
         jnp.sum(lower_values * lower_mask + upper_values * upper_mask, axis=1)
     )
 
-    def loss_fn(critic_params: Params):
+    def loss_fn(critic_variables):
         q_logits = critic.apply(
-            {"params": critic_params}, batch.observations, batch.actions, batch.task_ids
+            critic_variables, batch.observations, batch.actions, batch.task_ids
         )
         q_logprobs = jax.nn.log_softmax(q_logits, axis=-1)
         return -(target_probs[None] * q_logprobs).sum(-1).mean(-1).sum(-1)
 
-    return jax.grad(loss_fn)(critic.params)
+    return jax.grad(loss_fn)(critic.variables())['params']
 
 '''
 from jaxrl.utils import Batch
