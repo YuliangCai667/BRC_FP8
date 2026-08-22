@@ -31,12 +31,12 @@ class AlignmentPresetTest(unittest.TestCase):
         })
         self.assertEqual(resolve_paper_alignment(True), {
             'task_embedding_norm': 'l1',
-            'return_bootstrap': 'critic',
+            'return_bootstrap': 'reward_mean',
             'entropy_correction': 'empirical_per_task',
         })
-        result = resolve_paper_alignment(True, return_bootstrap='reward_mean')
+        result = resolve_paper_alignment(True, return_bootstrap='critic')
         self.assertEqual(result['task_embedding_norm'], 'l1')
-        self.assertEqual(result['return_bootstrap'], 'reward_mean')
+        self.assertEqual(result['return_bootstrap'], 'critic')
 
 
 class TaskEmbeddingTest(unittest.TestCase):

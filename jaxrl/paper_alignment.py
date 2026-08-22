@@ -2,7 +2,9 @@
 
 PAPER_PRESET = {
     "task_embedding_norm": "l1",
-    "return_bootstrap": "critic",
+    # Keep the return scale independent of critic predictions. Critic
+    # bootstrapping remains available as an explicit ablation override.
+    "return_bootstrap": "reward_mean",
     "entropy_correction": "empirical_per_task",
 }
 

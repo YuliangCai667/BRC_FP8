@@ -43,7 +43,7 @@ flags.DEFINE_integer('updates_per_step', 2, 'Number of updates per environment s
 flags.DEFINE_integer('width_critic', 4096, 'Width of the critic network.')
 flags.DEFINE_boolean(
     'paper_alignment', False,
-    'Enable the paper-aligned L1/bootstrap/empirical-entropy preset.',
+    'Enable L1 and empirical-entropy alignment while keeping reward-mean return-scale estimation.',
 )
 flags.DEFINE_enum(
     'task_embedding_norm', 'auto', ['auto', 'l1', 'l2'],
