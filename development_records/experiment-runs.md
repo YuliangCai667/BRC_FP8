@@ -4,7 +4,7 @@
 
 ## 汇总
 
-| 日期 | Run ID | 状态 | 实验 | Seed / GPU | 代码 | Eval success |
+| 日期 | Run ID | 状态 | 实验 | Seed / GPU | 代码 | Eval 结果 |
 |---|---|---|---|---|---|---|
 | 2026-08-21 | `t1eg59pz` | 完成 | 原始 BRC，固定 MetaWorld 配置 | 42 / GPU 1 | `codex/experiment-recorder`，运行时 `eec512f` + dirty，后整理为 `2ef1f94` | 最后 0.50；最好 0.62；末 3 次均值 0.56 |
 | 2026-08-21 | `3rfih1il` | 完成 | 原始 BRC，固定 MetaWorld 配置 | 1 / GPU 2 | 同上 | 最后 0.68；最好 0.72；末 3 次均值 0.70 |
@@ -66,7 +66,7 @@ env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 PATH=/usr/local/cuda-12.8/
 
 ## 运行中：DMC Dogs 四任务联合训练
 
-任务集合为 `dog-stand`、`dog-walk`、`dog-trot`、`dog-run`。四个环境并行交互，500,000 env steps 指每个任务的步数，对应总计 2,000,000 transitions。两次实验均为 seed 42，训练和 eval 环境使用相同初始 seed、独立 RNG；记录器和默认 checkpoint 策略均开启。
+任务集合为 `dog-stand`、`dog-walk`、`dog-trot`、`dog-run`。四个环境并行交互，500,000 env steps 指每个任务的步数，对应总计 2,000,000 transitions。两次实验均为 seed 42，训练和 eval 环境使用相同初始 seed、独立 RNG；记录器和默认 checkpoint 策略均开启。DMC 没有 MetaWorld 式 success 指标，命令行中的 `success=0` 不用于判断效果；比较 eval return，论文汇总口径为 return / 1000。
 
 ### 原始 BRC：`jvboukld`
 
