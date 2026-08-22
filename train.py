@@ -31,6 +31,7 @@ flags.DEFINE_integer('replay_buffer_size', 1000000, 'Replay buffer capacity per 
 flags.DEFINE_integer('start_training', 5000, 'Number of steps before training starts.')
 flags.DEFINE_string('env_names', 'cheetah-run', 'Environment name or named task group.')
 flags.DEFINE_boolean('log_to_wandb', True, 'Whether to mirror metrics to W&B.')
+flags.DEFINE_string('wandb_name', 'auto', 'W&B display name; auto uses the seed.')
 flags.DEFINE_boolean('offline_evaluation', True, 'Whether to perform deterministic evaluations.')
 flags.DEFINE_boolean('render', True, 'Whether to log evaluation videos.')
 flags.DEFINE_integer('updates_per_step', 2, 'Number of updates per environment step.')
@@ -163,7 +164,7 @@ def main(_):
             entity='',
             project='',
             group=FLAGS.env_names,
-            name=str(FLAGS.seed),
+            name=str(FLAGS.seed) if FLAGS.wandb_name == 'auto' else FLAGS.wandb_name,
         )
         if wandb_resume_id:
             init_kwargs.update(id=wandb_resume_id, resume='allow')
