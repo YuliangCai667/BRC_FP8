@@ -14,6 +14,7 @@
 | 2026-08-22 | `jvboukld` | 运行中 | DMC Dogs 四任务联合训练，原始 BRC | 42 / GPU 0 | `codex/experiment-recorder` @ `9891def` | 尚未到首次 eval（记录时 step 4,000） |
 | 2026-08-22 | `de2aug47` | 运行中 | DMC Dogs 四任务联合训练，论文对齐 BRC | 42 / GPU 3 | `codex/paper-alignment` @ `c41d510` | 尚未到首次 eval（记录时 step 4,000） |
 | 2026-08-23 | `ablation_bootstrap_only_s42_20260823` | 完成 | DMC Dogs 25k 消融：只改 critic bootstrap | 42 / GPU 1 | `codex/paper-alignment` @ `c41d510` | eval 关闭；25k train return 20.1；用于诊断尺度反馈 |
+| 2026-08-23 | `validation_reward_mean_gbar_s42_20260823` | 完成 | DMC Dogs 10k 验证：paper preset 改用 reward-mean `Gbar` | 42 / GPU 1 | 运行时 `c41d510` + 修改，后固化为 `9295a2d` | eval 关闭；10k train return 13.3；`Gbar` 约 6–19 |
 | 待 Dogs 完成 | `dmc_humanoids_original_s42_20260822` | 排队 | DMC Humanoids 三任务联合训练，原始 BRC | 42 / GPU 0 | 训练代码与 `e3a41da` 一致 | Dogs 正常到 500k 后启动 |
 | 待 Dogs 完成 | `dmc_humanoids_paper_s42_20260822` | 排队 | DMC Humanoids 三任务联合训练，论文对齐 BRC | 42 / GPU 3 | `codex/paper-alignment` @ `c41d510` | Dogs 正常到 500k 后启动 |
 
@@ -114,6 +115,13 @@ env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 PATH=/usr/local/cuda-12.8/
 ```
 
 关键观察：critic bootstrap 在 step 7,000 已达到归一化支持上界约 10，使每任务 `Gbar` 从 step 6,000 的约 29–33 扩张到 step 10,000 的约 105–109，25,000 时约 113–116；同期真实 episode return 仍远低于该尺度。25,000 步的 train return 为：original 64.1、bootstrap-only 20.1、完整 paper-aligned 18.9。单种子短跑表明 bootstrap 是尺度反馈的主要触发器，经验熵修正会进一步放大该反馈；不能据此替代完整多种子最终性能比较。
+
+### Reward-mean `Gbar` 验证
+
+- 时间：2026-08-23 00:37–00:43；GPU 1，与原有任务共享 GPU且未中断原任务。
+- W&B：[BRC-validation-DMC-DOGS-reward-mean-gbar-seed42](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/7egh3qkh)
+- 配置：L1 task embedding、reward-mean return scale、per-task empirical entropy；10,000 步，关闭 eval、checkpoint、profiling 和 tensor stats。
+- 结果：step 8,000 后 critic Q 仍饱和约 10，但 `Gbar` 到 step 10,000 仅为 `[19.1, 16.8, 11.0, 5.7]`；旧 critic-bootstrap + empirical-entropy 同期约为 `[294.6, 284.8, 287.3, 287.2]`。验证了尺度解耦，不代表最终性能结论。
 
 ## 排队：DMC Humanoids 三任务联合训练
 
