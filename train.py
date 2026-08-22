@@ -10,7 +10,7 @@ import numpy as np
 from absl import app, flags
 
 from jaxrl.agent.brc_learner import BRC
-from jaxrl.checkpoint import CheckpointManager
+from jaxrl.checkpoint import CheckpointManager, checkpoint_config_value
 from jaxrl.env_names import get_environment_list
 from jaxrl.envs import ParallelEnv
 from jaxrl.experiment import ExperimentRecorder, collect_jax_memory_stats, summarize_tree
@@ -35,6 +35,10 @@ flags.DEFINE_boolean('offline_evaluation', True, 'Whether to perform determinist
 flags.DEFINE_boolean('render', True, 'Whether to log evaluation videos.')
 flags.DEFINE_integer('updates_per_step', 2, 'Number of updates per environment step.')
 flags.DEFINE_integer('width_critic', 4096, 'Width of the critic network.')
+flags.DEFINE_enum(
+    'metaworld_reset_mode', 'resample', ['frozen', 'resample'],
+    'Keep one MetaWorld rand_vec or resample it on each reset.',
+)
 
 flags.DEFINE_string('run_root', 'runs', 'Root directory for local experiment data.')
 flags.DEFINE_string('run_id', 'auto', 'Local run id; auto generates one.')
@@ -142,9 +146,11 @@ def main(_):
         if resume_manifest['task_names'] != env_names:
             raise ValueError('checkpoint task names/order do not match --env_names')
         for key in ['env_names', 'seed', 'width_critic', 'updates_per_step',
-                    'batch_size', 'replay_buffer_size']:
-            previous = resume_manifest.get('config', {}).get(key)
-            current = config.get(key)
+                    'batch_size', 'replay_buffer_size', 'metaworld_reset_mode']:
+            previous = checkpoint_config_value(
+                resume_manifest.get('config', {}), key
+            )
+            current = checkpoint_config_value(config, key)
             if previous is not None and current is not None and previous != current:
                 raise ValueError(f'checkpoint configuration mismatch for {key}: {previous} != {current}')
 
@@ -193,8 +199,14 @@ def main(_):
     normal_exit = False
     initialization_start = time.perf_counter()
     try:
-        env = ParallelEnv(env_names, seed=FLAGS.seed)
-        eval_env = ParallelEnv(env_names, seed=FLAGS.seed + 42) if FLAGS.offline_evaluation else None
+        env = ParallelEnv(
+            env_names, seed=FLAGS.seed,
+            metaworld_reset_mode=FLAGS.metaworld_reset_mode,
+        )
+        eval_env = ParallelEnv(
+            env_names, seed=FLAGS.seed + 42,
+            metaworld_reset_mode=FLAGS.metaworld_reset_mode,
+        ) if FLAGS.offline_evaluation else None
         num_tasks = len(env.envs)
         agent = BRC(
             FLAGS.seed,

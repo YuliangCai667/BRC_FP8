@@ -76,7 +76,9 @@ def make_env(env_name: str, seed: int = 0) -> gym.Env:
 
 class ParallelEnv():
     
-    def __init__(self, env_names: list, seed: int = 0):
+    def __init__(self, env_names: list, seed: int = 0, metaworld_reset_mode: str = 'resample'):
+        if metaworld_reset_mode not in ('frozen', 'resample'):
+            raise ValueError("metaworld_reset_mode must be 'frozen' or 'resample'")
         
         np.random.seed(seed)
         random.seed(seed)
@@ -86,6 +88,17 @@ class ParallelEnv():
         act_dims = np.zeros(len(env_names), dtype=np.int32)
         for i, env_name in enumerate(env_names):
             envs.append(make_env(env_name, seed))
+            if (
+                metaworld_reset_mode == 'resample'
+                and '-goal-observable' in env_name
+            ):
+                base_env = envs[-1].unwrapped
+                if not hasattr(base_env, '_freeze_rand_vec'):
+                    raise AttributeError(
+                        f'{env_name} does not expose _freeze_rand_vec; '
+                        'the installed MetaWorld version is incompatible with resample mode'
+                    )
+                base_env._freeze_rand_vec = False
             obs_dims[i] = envs[-1].observation_space.shape[0]
             act_dims[i] = envs[-1].action_space.shape[0]
 
@@ -106,6 +119,10 @@ class ParallelEnv():
     
         
         self.envs = envs
+        self.env_names = list(env_names)
+        self.metaworld_reset_mode = metaworld_reset_mode
+        self._reset_rng = np.random.RandomState(seed)
+        self.last_reset_seeds = np.full(len(envs), -1, dtype=np.int64)
         self.obs_dims = obs_dims
         self.act_dims = act_dims
         self.state_dim_differences = state_dim_differences
@@ -114,7 +131,15 @@ class ParallelEnv():
         self.num_tasks = len(envs)
         
     def _reset_idx(self, idx: int):
-        seed = np.random.randint(0, 1e8)
+        resample_metaworld = (
+            self.metaworld_reset_mode == 'resample'
+            and '-goal-observable' in self.env_names[idx]
+        )
+        if resample_metaworld:
+            seed = int(self._reset_rng.randint(0, int(1e8)))
+        else:
+            seed = int(np.random.randint(0, int(1e8)))
+        self.last_reset_seeds[idx] = seed
         state, _ = self.envs[idx].reset(seed=seed)
         state = np.concatenate((state, np.zeros(self.state_dim_differences[idx], dtype=np.float32)), axis=0)
         return state
