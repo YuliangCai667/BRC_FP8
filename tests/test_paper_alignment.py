@@ -107,8 +107,15 @@ class FakeMetaWorldEnv:
         self.observation_space = gym.spaces.Box(-1, 1, shape=(3,), dtype=np.float32)
         self.action_space = gym.spaces.Box(-1, 1, shape=(2,), dtype=np.float32)
         self.closed = False
+        self._freeze_rand_vec = True
+        self.reset_seeds = []
+
+    @property
+    def unwrapped(self):
+        return self
 
     def reset(self, seed=None):
+        self.reset_seeds.append(seed)
         return np.full(3, self.seed, dtype=np.float32), {}
 
     def close(self):
@@ -116,7 +123,11 @@ class FakeMetaWorldEnv:
 
 
 class MetaWorldResetProtocolTest(unittest.TestCase):
-    def test_recreate_mode_constructs_a_new_instance(self):
+    def test_recreate_mode_is_rejected(self):
+        with self.assertRaises(ValueError):
+            ParallelEnv([], seed=7, metaworld_reset_mode='recreate')
+
+    def test_resample_mode_reuses_instance_and_unfreezes_rand_vec(self):
         made = []
 
         def factory(_name, seed):
@@ -127,13 +138,17 @@ class MetaWorldResetProtocolTest(unittest.TestCase):
         with mock.patch('jaxrl.envs.make_env', side_effect=factory):
             env = ParallelEnv(
                 ['fake-goal-observable'], seed=7,
-                metaworld_reset_mode='recreate',
+                metaworld_reset_mode='resample',
             )
             original = env.envs[0]
             env.reset()
-            self.assertIsNot(env.envs[0], original)
-            self.assertTrue(original.closed)
-            self.assertEqual(len(made), 2)
+            first_seed = original.reset_seeds[-1]
+            env.reset()
+            self.assertIs(env.envs[0], original)
+            self.assertFalse(original._freeze_rand_vec)
+            self.assertFalse(original.closed)
+            self.assertEqual(len(made), 1)
+            self.assertNotEqual(original.reset_seeds[-1], first_seed)
 
     def test_frozen_mode_reuses_the_instance(self):
         made = []

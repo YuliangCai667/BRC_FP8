@@ -2,21 +2,21 @@
 set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
-  echo "usage: $0 GPU_ID SEED {legacy_frozen|legacy_recreate|l1|bootstrap|entropy|paper_recreate}" >&2
+  echo "usage: $0 GPU_ID SEED {legacy_frozen|legacy_resample|l1|bootstrap|entropy|paper_resample}" >&2
   exit 2
 fi
 
 gpu_id=$1
 seed=$2
 variant=$3
-reset_mode=recreate
+reset_mode=resample
 alignment_flags=(--paper_alignment=false)
 
 case "$variant" in
   legacy_frozen)
     reset_mode=frozen
     ;;
-  legacy_recreate)
+  legacy_resample)
     ;;
   l1)
     alignment_flags+=(--task_embedding_norm=l1)
@@ -27,7 +27,7 @@ case "$variant" in
   entropy)
     alignment_flags+=(--entropy_correction=empirical_per_task)
     ;;
-  paper_recreate)
+  paper_resample)
     alignment_flags=(--paper_alignment=true)
     ;;
   *)

@@ -77,8 +77,8 @@ def make_env(env_name: str, seed: int = 0) -> gym.Env:
 class ParallelEnv():
     
     def __init__(self, env_names: list, seed: int = 0, metaworld_reset_mode: str = 'frozen'):
-        if metaworld_reset_mode not in ('frozen', 'recreate'):
-            raise ValueError("metaworld_reset_mode must be 'frozen' or 'recreate'")
+        if metaworld_reset_mode not in ('frozen', 'resample'):
+            raise ValueError("metaworld_reset_mode must be 'frozen' or 'resample'")
         
         np.random.seed(seed)
         random.seed(seed)
@@ -88,6 +88,17 @@ class ParallelEnv():
         act_dims = np.zeros(len(env_names), dtype=np.int32)
         for i, env_name in enumerate(env_names):
             envs.append(make_env(env_name, seed))
+            if (
+                metaworld_reset_mode == 'resample'
+                and '-goal-observable' in env_name
+            ):
+                base_env = envs[-1].unwrapped
+                if not hasattr(base_env, '_freeze_rand_vec'):
+                    raise AttributeError(
+                        f'{env_name} does not expose _freeze_rand_vec; '
+                        'the installed MetaWorld version is incompatible with resample mode'
+                    )
+                base_env._freeze_rand_vec = False
             obs_dims[i] = envs[-1].observation_space.shape[0]
             act_dims[i] = envs[-1].action_space.shape[0]
 
@@ -120,25 +131,17 @@ class ParallelEnv():
         self.num_tasks = len(envs)
         
     def _reset_idx(self, idx: int):
-        if self.metaworld_reset_mode == 'recreate':
+        resample_metaworld = (
+            self.metaworld_reset_mode == 'resample'
+            and '-goal-observable' in self.env_names[idx]
+        )
+        if resample_metaworld:
             seed = int(self._reset_rng.randint(0, int(1e8)))
         else:
             # Preserve the public implementation's global RNG behavior exactly.
             seed = int(np.random.randint(0, int(1e8)))
         self.last_reset_seeds[idx] = seed
-        if (
-            self.metaworld_reset_mode == 'recreate'
-            and '-goal-observable' in self.env_names[idx]
-        ):
-            old_env = self.envs[idx]
-            try:
-                old_env.close()
-            except Exception:
-                pass
-            self.envs[idx] = make_env(self.env_names[idx], seed)
-            state, _ = self.envs[idx].reset()
-        else:
-            state, _ = self.envs[idx].reset(seed=seed)
+        state, _ = self.envs[idx].reset(seed=seed)
         state = np.concatenate((state, np.zeros(self.state_dim_differences[idx], dtype=np.float32)), axis=0)
         return state
     

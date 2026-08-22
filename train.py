@@ -55,8 +55,8 @@ flags.DEFINE_enum(
     'Reward-scale entropy correction; auto follows --paper_alignment.',
 )
 flags.DEFINE_enum(
-    'metaworld_reset_mode', 'frozen', ['frozen', 'recreate'],
-    'Keep one MetaWorld rand_vec or reconstruct the task after each episode.',
+    'metaworld_reset_mode', 'frozen', ['frozen', 'resample'],
+    'Keep one MetaWorld rand_vec or resample it on each reset.',
 )
 
 flags.DEFINE_string('run_root', 'runs', 'Root directory for local experiment data.')
