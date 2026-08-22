@@ -17,6 +17,15 @@ import numpy as np
 CHECKPOINT_SCHEMA_VERSION = 1
 
 
+def checkpoint_config_value(config: Mapping[str, Any], key: str):
+    """Interpret protocol fields missing from historical checkpoints."""
+    if key == "metaworld_reset_mode":
+        return config.get(key, "frozen")
+    if key == "eval_seed_offset":
+        return config.get(key, 42)
+    return config.get(key)
+
+
 def _tree_nbytes(tree) -> int:
     import jax
 
@@ -224,10 +233,11 @@ class CheckpointManager:
             raise ValueError("checkpoint task names/order do not match the current run")
         for key in ["env_names", "seed", "width_critic", "updates_per_step",
                     "batch_size", "replay_buffer_size", "metaworld_reset_mode",
+                    "eval_seed_offset",
                     "resolved_task_embedding_norm", "resolved_return_bootstrap",
                     "resolved_entropy_correction"]:
-            old = manifest.get("config", {}).get(key)
-            new = self.config.get(key)
+            old = checkpoint_config_value(manifest.get("config", {}), key)
+            new = checkpoint_config_value(self.config, key)
             if old is not None and new is not None and old != new:
                 raise ValueError(f"checkpoint configuration mismatch for {key}: {old} != {new}")
         agent.load(str(checkpoint))

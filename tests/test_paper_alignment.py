@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jaxrl.agent.brc_learner import BRC
+from jaxrl.checkpoint import checkpoint_config_value
 from jaxrl.envs import ParallelEnv
 from jaxrl.networks import TaskEmbedding
 from jaxrl.normalizer import RewardNormalizer
@@ -15,6 +16,13 @@ from jaxrl.utils import Batch
 
 
 class AlignmentPresetTest(unittest.TestCase):
+    def test_historical_eval_seed_protocol_is_explicit(self):
+        self.assertEqual(checkpoint_config_value({}, 'eval_seed_offset'), 42)
+        self.assertEqual(
+            checkpoint_config_value({'eval_seed_offset': 0}, 'eval_seed_offset'),
+            0,
+        )
+
     def test_presets_and_independent_override(self):
         self.assertEqual(resolve_paper_alignment(False), {
             'task_embedding_norm': 'l2',
