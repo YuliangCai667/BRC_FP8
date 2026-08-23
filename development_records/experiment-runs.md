@@ -20,8 +20,8 @@
 | 2026-08-23 | `dmc_dogs_rewardmean_paper_s42_20260823` / `ttb7gnbz` | 运行中 | DMC Dogs，稳定化论文对齐 BRC | 42 / GPU 3 | `codex/paper-alignment` @ `9295a2d` | 正式 500k；完成后自动接 Humanoids |
 | Dogs 完成后 | `dmc_humanoids_rewardmean_paper_s42_20260823` | 排队 | DMC Humanoids，稳定化论文对齐 BRC | 42 / GPU 3 | `codex/paper-alignment` @ `9295a2d` | 仅 Dogs 正常退出后启动 |
 | 2026-08-24 00:14 | `brc_cheetah_run_d_target_fp8_resident_s0_smoke_final` | 完成 | `EXP-FP8-TARGET-SMOKE-D`：审查后常驻 FP8 目标 Critic 最终短跑验收 | 0 / GPU 3（另有约 8 GiB 外部任务） | `codex/blackwell-fp8-direct` @ `9c81c7d` + 本轮未提交实现 | 200 步、203 updates；无 NaN/Inf；实际 EMA 吞更新率 `8.01e-5`–`1.18e-4`；验收通过 |
-| 2026-08-23（计划） | `brc_dmc_dogs_c_target_fp8_resident_s42` | 计划中 | `EXP-FP8-TARGET-C-S42`：在线 FP32、目标残差 kernel 常驻 FP8 | 42 / GPU 3（与 D 共享） | `codex/blackwell-fp8-direct`，提交待短跑通过后填写 | 正式 Dogs 500k；对照 A 最终 794.40；尚未启动 |
-| 2026-08-23（计划） | `brc_dmc_dogs_d_target_fp8_resident_s42` | 计划中 | `EXP-FP8-TARGET-D-S42`：在线 FP8 Direct、目标残差 kernel 常驻 FP8 | 42 / GPU 3（与 C 共享） | `codex/blackwell-fp8-direct`，提交待短跑通过后填写 | 正式 Dogs 500k；对照 B 最终 816.37；尚未启动 |
+| 2026-08-24 00:24 | `brc_dmc_dogs_c_target_fp8_resident_s42` / `trzg1mjw` | 运行中 | `EXP-FP8-TARGET-C-S42`：在线 FP32、目标残差 kernel 常驻 FP8 | 42 / GPU 3（与 D 及外部任务共享） | `codex/blackwell-fp8-direct` @ `f88b662`，clean | 正式 Dogs 500k；step 5k 首次更新有限、无 NaN/Inf；对照 A 最终 794.40 |
+| 2026-08-24 00:24 | `brc_dmc_dogs_d_target_fp8_resident_s42` / `fb02bf23` | 运行中 | `EXP-FP8-TARGET-D-S42`：在线 FP8 Direct、目标残差 kernel 常驻 FP8 | 42 / GPU 3（与 C 及外部任务共享） | `codex/blackwell-fp8-direct` @ `f88b662`，clean | 正式 Dogs 500k；step 5k 首次更新有限、无 NaN/Inf；对照 B 最终 816.37 |
 
 ## 已完成：原始 BRC 三种子基线
 
@@ -169,9 +169,9 @@ tmux attach -t brc_dmc_humanoids_paper_queue
 - Humanoids 本地 run ID `dmc_humanoids_rewardmean_paper_s42_20260823`；Dogs 以退出码 0 完成 500k 后立即启动，Dogs 异常退出则不启动。
 - 两段均使用正式配置：500k steps、start training 5k、buffer 1M、batch 1024、2 updates/step、critic width 4096、每 25k 步评估 10 episodes，并启用完整 recorder/checkpoint 策略。
 
-## 计划：常驻 FP8 目标 Critic 的 C/D 实验
+## 常驻 FP8 目标 Critic 的 C/D 实验
 
-以下 C/D 正式实验仍为预登记的 `planned` 状态；短跑已完成。代码范围固定为 `/home/caiyuliang/BRC_FP8_blackwell_fp8` 的 `codex/blackwell-fp8-direct`；正式实验的实际启动提交必须是短跑通过后形成的干净实现提交，并在启动验证后回填 commit、时间和 W&B ID。
+短跑通过后，C/D 已从预登记状态切换为运行中。两者均从 `/home/caiyuliang/BRC_FP8_blackwell_fp8` 的干净提交 `f88b6628d39caec72f48e0e22d4d8dde815d1745` 启动，且该提交已先推送并与远端 `origin/codex/blackwell-fp8-direct` 核对一致。
 
 既有严格对照采用相同的 DMC Dogs seed-42 正式协议：A（`dmc_dogs_rewardmean_paper_s42_20260823`）为在线/目标 Critic 均 FP32，最终 eval return `794.40`；B（`dmc_dogs_rewardmean_paper_fp8_direct_s42_20260823`）为在线 Critic `fp8_direct`、目标 Critic FP32，最终 eval return `816.37`。C 直接对照 A 以隔离目标常驻 FP8，D 直接对照 B 以隔离目标常驻 FP8；C/D 之间只用于观察在线 Critic 精度在同一常驻 FP8 目标下的差异。
 
@@ -229,11 +229,12 @@ tmux new-session -d -s brc_fp8_target_smoke_d_final_gpu3 \
 
 ### `EXP-FP8-TARGET-C-S42` — 在线 FP32 / 目标常驻 FP8
 
-- 状态：计划中；只在 `EXP-FP8-TARGET-SMOKE-D` 通过且实现提交、推送并核对远端后启动。
+- 状态：运行中；2026-08-24 00:24:56 Asia/Shanghai 启动，tmux、进程、run 目录、初始化事件、配置、W&B 与首次更新均已验证。
 - 目的：相对 A 仅改变目标 Critic 的四个逻辑残差 Dense kernel，将其常驻 E4M3、以 FP8 前向并逐步 FP8 EMA；在线 Critic 与 Adam 保持 FP32。
-- 预定运行：GPU 3；tmux、本地 run ID 与 W&B 名称均为 `brc_dmc_dogs_c_target_fp8_resident_s42`；W&B ID/URL 待启动后回填。
+- 实际运行：GPU 3；tmux、本地 run ID 与 W&B 名称均为 `brc_dmc_dogs_c_target_fp8_resident_s42`；[W&B `trzg1mjw`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/trzg1mjw)。
 - 协议：DMC Dogs 四任务，seed 42，500,000 env steps/task，step 5,000 开始训练，replay 1M/task，batch 1,024，2 updates/step，critic width 4,096；paper alignment、reward-mean bootstrap；每 25,000 步做 10 episodes 确定性 eval 和 tensor stats；analysis checkpoint 每 50,000 步、recovery checkpoint 每 100,000 步。
 - 比较：直接对照 A（FP32/FP32，最终 eval return `794.40`）；同时报告 C/D，但不把单种子差异解释为稳定统计结论。
+- 启动验证：metadata 为 clean `f88b662`，CUDA root/home 与 `ptxas 12.8.61` 均解析到 `/usr/local/cuda-12.8`；配置解析为 `critic_precision=fp32`、`target_critic_precision=fp8_resident`、残差 kernel 常驻范围、动态 current-amax per-tensor 权重/激活缩放。recorder 现有 schema 没有名为 `run_started` 的事件；等价的首事件 `wandb_initialization_finished` 与后续 `initialization_finished` 均成功。step 5,000 首次更新完成，critic loss `24.165`、critic grad norm `20.603`、actor loss `26.968`、actor grad norm `22.436`，`update_nan_count=0`、`update_inf_count=0`。
 
 ```bash
 tmux new-session -d -s brc_dmc_dogs_c_target_fp8_resident_s42 \
@@ -283,11 +284,12 @@ tmux new-session -d -s brc_dmc_dogs_c_target_fp8_resident_s42 \
 
 ### `EXP-FP8-TARGET-D-S42` — 在线 FP8 Direct / 目标常驻 FP8
 
-- 状态：计划中；与 C 使用同一通过短跑验证的干净提交，在两个独立 tmux 中并行启动。
+- 状态：运行中；2026-08-24 00:24:55 Asia/Shanghai 启动，与 C 使用同一干净提交，在两个独立 tmux 中并行运行。
 - 目的：相对 B 仅把目标 Critic 的四个逻辑残差 Dense kernel 改为常驻 E4M3、FP8 前向和逐步 FP8 EMA；在线 Critic 继续使用现有 `fp8_direct`。
-- 预定运行：GPU 3；tmux、本地 run ID 与 W&B 名称均为 `brc_dmc_dogs_d_target_fp8_resident_s42`；W&B ID/URL 待启动后回填。
+- 实际运行：GPU 3；tmux、本地 run ID 与 W&B 名称均为 `brc_dmc_dogs_d_target_fp8_resident_s42`；[W&B `fb02bf23`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/fb02bf23)。
 - 协议：除精度开关外与 C 及既有 A/B 的正式 Dogs 协议逐项一致。
 - 比较：直接对照 B（在线 FP8 Direct/目标 FP32，最终 eval return `816.37`），并以 C/D 的目标 EMA、activation、forward-error 和 eval 曲线检查数值稳定性与学习效果。
+- 启动验证：metadata 为 clean `f88b662`，CUDA/`ptxas` 与 C 相同；配置解析为 `critic_precision=fp8_direct`、`target_critic_precision=fp8_resident` 和同一目标缩放/覆盖语义。`wandb_initialization_finished`、`initialization_finished` 与 step 5,000 的 `first_update_finished` 均成功；首次 critic loss `22.041`、critic grad norm `18.795`、actor loss `26.839`、actor grad norm `22.499`，`update_nan_count=0`、`update_inf_count=0`。
 
 ```bash
 tmux new-session -d -s brc_dmc_dogs_d_target_fp8_resident_s42 \
@@ -335,7 +337,7 @@ tmux new-session -d -s brc_dmc_dogs_d_target_fp8_resident_s42 \
   "'
 ```
 
-正式 C/D 启动后，只有同时验证两个 tmux、两个训练进程、GPU3 占用、两个 run 目录、各自 `run_started`、解析后的 `critic_precision`/`target_critic_precision` 以及实际 W&B ID，才把状态由“计划中”改为“运行中”。两任务共享同一 GPU3，资源竞争污染 wall clock、功耗与吞吐，因此本轮不据此作性能结论；学习效果和数值稳定性仍按各自 eval 与低频 tensor-stat 记录分析，并明确保留共享 GPU 这一混杂因素。
+启动门已满足：两个 tmux、两个训练进程、GPU3 占用、两个 run 目录、初始化事件、解析后的精度配置和实际 W&B ID 均已核对。验证时 GPU3 总占用约 `75.8 GiB`，其中另有一个非本项目进程占约 `58.0 GiB`；C/D 仍有足够显存并完成首次更新，但这种三进程共享进一步污染 wall clock、功耗与吞吐。因此本轮不据此作性能结论；学习效果和数值稳定性只按各自 eval 与低频 tensor-stat 分析，并始终披露共享 GPU 混杂。
 
 ## 更新规则
 

@@ -23,6 +23,8 @@ Status: `testing`
 
 Updated: 2026-08-24. The accepted first test stores only the four logical residual-Dense kernels of the target Critic in E4M3, with one dynamic per-tensor scale per ensemble member. It applies the original per-step `tau=0.005` EMA and deliberately excludes Kahan summation, error feedback, stochastic rounding, block scaling, and delayed target updates. C keeps the online Critic FP32; D uses the existing online `fp8_direct` path. Both use the same resident-FP8 target core. The final width-512 D smoke run completed 203 updates without NaN/Inf; at step 150, the final actual EMA write swallowed only `8.01e-5`–`1.18e-4` of nonzero element updates and retained an applied/intended L2 ratio of `0.999999`–`1.000005`. This is a mechanism check, not enough evidence to accept or reject the idea at width 4,096 and 500k steps.
 
+Formal width-4,096 Dogs seed-42 C/D runs started from clean commit `f88b662` on 2026-08-24. C is W&B `trzg1mjw`; D is `fb02bf23`. Both completed their first learner update without NaN/Inf. They share GPU3 with each other and an external process, so only stability/learning evidence is admissible.
+
 Working names:
 
 - resolution-matched target update;

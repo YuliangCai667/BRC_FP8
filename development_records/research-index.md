@@ -3,6 +3,7 @@
 - 周期：ICLR 投稿周期；2026-08-23 时用户说明距截稿约一个月，精确日期待补。
 - 方向：在 Blackwell 上把 BRC 从原生 FP8 Critic 计算逐步扩展到低精度持久训练状态。
 - 代码范围：`/home/caiyuliang/BRC_FP8_blackwell_fp8`，`codex/blackwell-fp8-direct`。
+- 当前常驻目标实现：`f88b6628d39caec72f48e0e22d4d8dde815d1745`，已推送到对应远端分支。
 - 当前目标：验证目标 Critic 残差核心常驻 FP8 后，逐步 EMA 是否被量化格点吞掉，以及 bootstrap 前向误差是否影响稳定性。
 
 ## 文档登记
@@ -25,6 +26,6 @@
 ## 当前实验与决策门
 
 - `EXP-FP8-TARGET-SMOKE-D`：审查后 GPU3 最终短跑已通过；203 updates 无 NaN/Inf，step 150 最后一次真实 EMA 写回在八个目标矩阵上的吞更新率为 `8.01e-5`–`1.18e-4`，applied/intended L2 ratio 为 `0.999999`–`1.000005`。这只是 width-512 单点机制证据。
-- `EXP-FP8-TARGET-C-S42`：在线 FP32、目标残差核心常驻 FP8。
-- `EXP-FP8-TARGET-D-S42`：在线 FP8 Direct、目标残差核心常驻 FP8。
+- `EXP-FP8-TARGET-C-S42`：运行中；在线 FP32、目标残差核心常驻 FP8，W&B `trzg1mjw`。
+- `EXP-FP8-TARGET-D-S42`：运行中；在线 FP8 Direct、目标残差核心常驻 FP8，W&B `fb02bf23`。
 - 下一决策门：只在 C/D 证明存在明显吞更新或训练不稳定后，选择更新频率匹配、Kahan、随机舍入或其他修正；当前不预埋任何修正。
