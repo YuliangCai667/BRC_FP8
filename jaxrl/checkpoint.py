@@ -20,7 +20,7 @@ RESUME_CONFIG_KEYS = [
     "env_names", "seed", "width_critic", "updates_per_step", "batch_size",
     "replay_buffer_size", "metaworld_reset_mode", "eval_seed_offset",
     "resolved_task_embedding_norm", "resolved_return_bootstrap",
-    "resolved_entropy_correction", "critic_precision",
+    "resolved_entropy_correction", "critic_precision", "target_critic_precision",
     "fp8_amax_history_length",
 ]
 
@@ -32,6 +32,8 @@ def checkpoint_config_value(config: Mapping[str, Any], key: str):
     if key == "eval_seed_offset":
         return config.get(key, 42)
     if key == "critic_precision":
+        return config.get(key, "fp32")
+    if key == "target_critic_precision":
         return config.get(key, "fp32")
     if key == "fp8_amax_history_length":
         return config.get(key, 1024)
@@ -48,8 +50,15 @@ def validate_checkpoint_config(previous: Mapping[str, Any], current: Mapping[str
             f"checkpoint configuration mismatch for critic_precision: "
             f"{old_precision} != {new_precision}"
         )
+    old_target_precision = checkpoint_config_value(previous, "target_critic_precision")
+    new_target_precision = checkpoint_config_value(current, "target_critic_precision")
+    if old_target_precision != new_target_precision:
+        raise ValueError(
+            f"checkpoint configuration mismatch for target_critic_precision: "
+            f"{old_target_precision} != {new_target_precision}"
+        )
     for key in RESUME_CONFIG_KEYS:
-        if key == "critic_precision":
+        if key in ("critic_precision", "target_critic_precision"):
             continue
         if key == "fp8_amax_history_length" and old_precision != "fp8_direct":
             continue
@@ -167,11 +176,12 @@ class CheckpointManager:
         return final_path
 
     def _base_manifest(self, kind: str, env_step: int, agent, **fields):
-        parameter_dtypes = sorted({str(leaf.dtype) for model in [agent.actor, agent.critic]
+        models = [agent.actor, agent.critic, agent.target_critic, agent.temp]
+        parameter_dtypes = sorted({str(leaf.dtype) for model in models
                                    for leaf in __import__('jax').tree_util.tree_leaves(model.params)})
         fp8_metadata_dtypes = sorted({
             str(leaf.dtype)
-            for model in [agent.actor, agent.critic]
+            for model in models
             for leaf in __import__('jax').tree_util.tree_leaves(model.fp8_meta)
         })
         return {

@@ -1,7 +1,134 @@
 import functools
 import jax.numpy as jnp
 import jax
+from flax import traverse_util
+
+from jaxrl.networks import dequantize_e4m3, quantize_e4m3_per_tensor
 from jaxrl.utils import Batch, Model, PRNGKey, tree_norm
+
+
+def _is_resident_kernel(path):
+    return (
+        path[-1] == 'kernel'
+        and path[-2].startswith('Dense_')
+        and any(part.startswith('BronetBlock_') for part in path)
+    )
+
+
+def _scale_path(kernel_path):
+    return kernel_path[:-1] + ('kernel_scale',)
+
+
+def _quantize_ensemble(kernels):
+    return jax.vmap(quantize_e4m3_per_tensor)(kernels)
+
+
+def _dequantize_ensemble(codes, scales):
+    return jax.vmap(dequantize_e4m3)(codes, scales)
+
+
+def initialize_target_critic(critic: Model, target_critic: Model):
+    """Copy online parameters and quantize only resident target kernels."""
+    if target_critic.fp8_meta is None:
+        return target_critic.replace(params=critic.params)
+
+    params = traverse_util.flatten_dict(critic.params)
+    metadata = traverse_util.flatten_dict(target_critic.fp8_meta)
+    resident_params = dict(params)
+    for path, value in params.items():
+        if _is_resident_kernel(path):
+            codes, scale = _quantize_ensemble(value)
+            resident_params[path] = codes
+            metadata[_scale_path(path)] = scale
+    return target_critic.replace(
+        params=traverse_util.unflatten_dict(resident_params),
+        fp8_meta=traverse_util.unflatten_dict(metadata),
+    )
+
+
+@jax.jit
+def dequantize_target_params(target_critic: Model):
+    """Return an ephemeral FP32 parameter tree for low-frequency diagnostics."""
+    if target_critic.fp8_meta is None:
+        return target_critic.params
+
+    params = traverse_util.flatten_dict(target_critic.params)
+    metadata = traverse_util.flatten_dict(target_critic.fp8_meta)
+    dequantized = dict(params)
+    for path, value in params.items():
+        if _is_resident_kernel(path):
+            dequantized[path] = _dequantize_ensemble(
+                value, metadata[_scale_path(path)]
+            )
+    return traverse_util.unflatten_dict(dequantized)
+
+
+@functools.partial(jax.jit, static_argnames=('tau',))
+def target_ema_diagnostics(
+    critic: Model, target_critic: Model, tau: float
+):
+    """Measure the EMA candidate for the supplied exact pre-update states."""
+    if target_critic.fp8_meta is None:
+        return {}
+
+    online = traverse_util.flatten_dict(critic.params)
+    target = traverse_util.flatten_dict(target_critic.params)
+    metadata = traverse_util.flatten_dict(target_critic.fp8_meta)
+    diagnostics = {}
+    for path, online_value in online.items():
+        if not _is_resident_kernel(path):
+            continue
+        codes = target[path]
+        scale = metadata[_scale_path(path)]
+        old_value = _dequantize_ensemble(codes, scale)
+        intended = tau * (online_value - old_value)
+        candidate = old_value + intended
+        next_codes, next_scale = _quantize_ensemble(candidate)
+        applied = _dequantize_ensemble(next_codes, next_scale) - old_value
+        layer = '/'.join(path[:-1])
+        for member in range(codes.shape[0]):
+            member_intended = intended[member]
+            member_applied = applied[member]
+            intended_norm = jnp.linalg.norm(member_intended)
+            applied_nonzero = member_applied != 0
+            intended_nonzero = member_intended != 0
+            comparable = intended_nonzero & applied_nonzero
+            diagnostics[f'{layer}/ensemble_{member}'] = {
+                'kernel_scale': scale[member],
+                'kernel_amax': jnp.max(jnp.abs(old_value[member])),
+                'next_kernel_scale': next_scale[member],
+                'code_unchanged_fraction': jnp.mean(
+                    next_codes[member] == codes[member]
+                ),
+                'swallowed_update_fraction': (
+                    jnp.sum(intended_nonzero & ~applied_nonzero)
+                    / jnp.maximum(jnp.sum(intended_nonzero), 1)
+                ),
+                'intended_update_abs_mean': jnp.mean(jnp.abs(member_intended)),
+                'applied_update_abs_mean': jnp.mean(jnp.abs(member_applied)),
+                'applied_to_intended_l2_ratio': jnp.where(
+                    intended_norm > 0,
+                    jnp.linalg.norm(member_applied) / intended_norm,
+                    0.0,
+                ),
+                'relative_update_error': jnp.where(
+                    intended_norm > 0,
+                    jnp.linalg.norm(member_applied - member_intended)
+                    / intended_norm,
+                    0.0,
+                ),
+                'sign_agreement': (
+                    jnp.sum(
+                        comparable
+                        & (jnp.sign(member_applied) == jnp.sign(member_intended))
+                    )
+                    / jnp.maximum(jnp.sum(comparable), 1)
+                ),
+                'online_target_gap_abs_mean': jnp.mean(
+                    jnp.abs(online_value[member] - old_value[member])
+                ),
+            }
+    return diagnostics
 
 @functools.partial(jax.jit, static_argnames=('multitask'))
 def build_actor_input(critic: Model, observations: jnp.ndarray, task_ids: jnp.ndarray, multitask: bool):
@@ -99,6 +226,31 @@ def update_critic(key: PRNGKey, actor: Model, critic: Model, target_critic: Mode
     return new_critic, info
 
 def update_target_critic(critic: Model, target_critic: Model, tau: float):
+    if target_critic.fp8_meta is not None:
+        online = traverse_util.flatten_dict(critic.params)
+        target = traverse_util.flatten_dict(target_critic.params)
+        metadata = traverse_util.flatten_dict(target_critic.fp8_meta)
+        new_params = {}
+        new_metadata = dict(metadata)
+        for path, online_value in online.items():
+            target_value = target[path]
+            if _is_resident_kernel(path):
+                old_value = _dequantize_ensemble(
+                    target_value, metadata[_scale_path(path)]
+                )
+                candidate = old_value + tau * (online_value - old_value)
+                codes, scale = _quantize_ensemble(candidate)
+                new_params[path] = codes
+                new_metadata[_scale_path(path)] = scale
+            else:
+                new_params[path] = (
+                    online_value * tau + target_value * (1 - tau)
+                )
+        return target_critic.replace(
+            params=traverse_util.unflatten_dict(new_params),
+            fp8_meta=traverse_util.unflatten_dict(new_metadata),
+        )
+
     new_target_params = jax.tree.map(
         lambda p, tp: p * tau + tp * (1 - tau), critic.params,
         target_critic.params)

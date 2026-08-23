@@ -49,9 +49,26 @@ device metric easier to interpret.
 
 The online critic can run the four Dense layers inside its two residual blocks
 with native FP8 matrix multiplication. Input/output projections, LayerNorm,
-the target critic, master parameters, and optimizer state remain FP32. Use
+master parameters, and optimizer state remain FP32. Use
 `--critic_precision=fp8_direct`; per-tensor scaling uses a 1,024-entry amax
 history by default.
+
+The same four logical Dense kernels in the target critic can instead remain
+device-resident in E4M3 with `--target_critic_precision=fp8_resident`. Each
+ensemble member has an independent FP32 per-tensor scale. Target activations are
+dynamically quantized to E4M3, GEMMs accumulate and return FP32, and the original
+`tau=0.005` EMA is computed transiently in FP32 before the result is immediately
+requantized. There is no persistent FP32 target master, Kahan compensation,
+stochastic rounding, block scaling, or delayed target update in this mode.
+
+The controlled target experiments are:
+
+- C: `--critic_precision=fp32 --target_critic_precision=fp8_resident`
+- D: `--critic_precision=fp8_direct --target_critic_precision=fp8_resident`
+
+Resident-target checkpoints support same-mode recovery only. Converting an
+existing FP32 target checkpoint to resident FP8 is intentionally unsupported in
+this first mechanism test.
 
 For the paper-aligned MetaWorld configuration, run:
 

@@ -9,8 +9,11 @@ from flax import traverse_util
 
 from jaxrl.agent.update import (
     build_actor_input,
+    dequantize_target_params,
     get_actor_gradients,
     get_critic_gradients,
+    initialize_target_critic,
+    target_ema_diagnostics,
     update_actor,
     update_critic,
     update_target_critic,
@@ -128,8 +131,19 @@ def _get_gradient_diagnostics(
     }
 
 
-@functools.partial(jax.jit, static_argnames=('multitask',))
-def _get_forward_diagnostics(actor, critic, batch, multitask):
+@functools.partial(
+    jax.jit, static_argnames=('multitask', 'num_bins', 'v_max')
+)
+def _get_forward_diagnostics(
+    actor,
+    critic,
+    target_critic,
+    target_reference,
+    batch,
+    multitask,
+    num_bins,
+    v_max,
+):
     actor_inputs = build_actor_input(
         critic, batch.observations, batch.task_ids, multitask
     )
@@ -145,7 +159,14 @@ def _get_forward_diagnostics(actor, critic, batch, multitask):
         batch.task_ids,
         mutable=['intermediates'],
     )
-    return {
+    target_logits, target_intermediates = target_critic.apply_fn.apply(
+        target_critic.variables(),
+        batch.observations,
+        batch.actions,
+        batch.task_ids,
+        mutable=['intermediates'],
+    )
+    diagnostics = {
         'inputs': {
             'actor': actor_inputs,
             'critic_observations': batch.observations,
@@ -155,11 +176,108 @@ def _get_forward_diagnostics(actor, critic, batch, multitask):
             'policy_mean': policy.distribution.loc,
             'policy_std': policy.distribution.scale_diag,
             'critic_logits': q_logits,
+            'target_critic_logits': target_logits,
         },
         'activations': {
             'actor': actor_intermediates.get('intermediates', {}),
             'critic': critic_intermediates.get('intermediates', {}),
+            'target_critic': _split_ensemble_intermediates(
+                target_intermediates.get('intermediates', {})
+            ),
         },
+    }
+    if target_reference is not None:
+        reference_logits = target_reference(
+            batch.observations, batch.actions, batch.task_ids
+        )
+        fp8_probabilities = jax.nn.softmax(target_logits, axis=-1)
+        fp32_probabilities = jax.nn.softmax(reference_logits, axis=-1)
+        support = jnp.linspace(-v_max, v_max, num_bins)
+        fp8_q = (fp8_probabilities * support).sum(axis=-1)
+        fp32_q = (fp32_probabilities * support).sum(axis=-1)
+        member_midpoint = 0.5 * (fp8_probabilities + fp32_probabilities)
+        member_js_divergence = 0.5 * jnp.sum(
+            jnp.where(
+                fp8_probabilities > 0,
+                fp8_probabilities
+                * (jnp.log(fp8_probabilities) - jnp.log(member_midpoint)),
+                0.0,
+            )
+            + jnp.where(
+                fp32_probabilities > 0,
+                fp32_probabilities
+                * (jnp.log(fp32_probabilities) - jnp.log(member_midpoint)),
+                0.0,
+            ),
+            axis=-1,
+        )
+        member_error = fp8_q - fp32_q
+        aggregate_fp8 = fp8_probabilities.mean(axis=0)
+        aggregate_fp32 = fp32_probabilities.mean(axis=0)
+        aggregate_midpoint = 0.5 * (aggregate_fp8 + aggregate_fp32)
+        aggregate_js_divergence = 0.5 * jnp.sum(
+            jnp.where(
+                aggregate_fp8 > 0,
+                aggregate_fp8
+                * (jnp.log(aggregate_fp8) - jnp.log(aggregate_midpoint)),
+                0.0,
+            )
+            + jnp.where(
+                aggregate_fp32 > 0,
+                aggregate_fp32
+                * (jnp.log(aggregate_fp32) - jnp.log(aggregate_midpoint)),
+                0.0,
+            ),
+            axis=-1,
+        )
+        aggregate_error = (
+            (aggregate_fp8 - aggregate_fp32) * support
+        ).sum(axis=-1)
+        diagnostics['outputs']['target_critic_fp32_reference_logits'] = (
+            reference_logits
+        )
+        diagnostics['target_forward_error'] = {
+            'aggregate': _forward_error_summary(
+                aggregate_error, aggregate_js_divergence
+            ),
+            **{
+                f'ensemble_{member}': _forward_error_summary(
+                    member_error[member], member_js_divergence[member]
+                )
+                for member in range(target_logits.shape[0])
+            },
+        }
+    return diagnostics
+
+
+def _forward_error_summary(error, js_divergence):
+    return {
+        'expected_q_mae': jnp.mean(jnp.abs(error)),
+        'expected_q_signed_bias': jnp.mean(error),
+        'probability_js_divergence_mean': jnp.mean(js_divergence),
+    }
+
+
+def _split_ensemble_intermediates(intermediates):
+    split = {}
+    for path, captures in traverse_util.flatten_dict(
+        intermediates, sep='/'
+    ).items():
+        values = captures[0]
+        split[path] = {
+            f'ensemble_{member}': values[member]
+            for member in range(values.shape[0])
+        }
+    return split
+
+
+def _split_ensemble_arrays(flat_values):
+    return {
+        path: {
+            f'ensemble_{member}': value[member]
+            for member in range(value.shape[0])
+        }
+        for path, value in flat_values.items()
     }
 
 def _update(
@@ -176,9 +294,15 @@ def _update(
     v_max: float,
     multitask: bool,
     num_tasks: int,
+    collect_target_ema_diagnostics: bool,
 ):
     rng, actor_key, critic_key = jax.random.split(rng, 3)
     new_critic, critic_info = update_critic(critic_key, actor, critic, target_critic, temp, batch, discount, num_bins, v_max, multitask)
+    ema_diagnostics = (
+        target_ema_diagnostics(new_critic, target_critic, tau)
+        if collect_target_ema_diagnostics
+        else {}
+    )
     new_target_critic = update_target_critic(new_critic, target_critic, tau)
     new_actor, new_critic, actor_info = update_actor(
         actor_key, actor, new_critic, temp, batch, num_bins, v_max, multitask, num_tasks
@@ -188,9 +312,9 @@ def _update(
         **critic_info,
         **actor_info,
         **alpha_info,
-    }
+    }, ema_diagnostics
 
-@functools.partial(jax.jit, static_argnames=('discount', 'tau', 'target_entropy', 'num_bins', 'v_max', 'multitask', 'num_tasks', 'num_updates'))
+@functools.partial(jax.jit, static_argnames=('discount', 'tau', 'target_entropy', 'num_bins', 'v_max', 'multitask', 'num_tasks', 'num_updates', 'collect_target_ema_diagnostics'))
 def _do_multiple_updates(
     rng: PRNGKey,
     actor: Model,
@@ -206,12 +330,21 @@ def _do_multiple_updates(
     multitask: bool, 
     num_tasks: int,
     step: int,    
-    num_updates: int
+    num_updates: int,
+    collect_target_ema_diagnostics: bool,
 ):
-    def one_step(i, state):
+    def run_update(i, state, collect_diagnostics):
         step, rng, actor, critic, target_critic, temp, info = state
         step = step + 1
-        new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update(
+        (
+            new_rng,
+            new_actor,
+            new_critic,
+            new_target_critic,
+            new_temp,
+            info,
+            ema_diagnostics,
+        ) = _update(
             rng,
             actor,
             critic,
@@ -225,11 +358,35 @@ def _do_multiple_updates(
             v_max,
             multitask,
             num_tasks,
+            collect_diagnostics,
         )
-        return step, new_rng, new_actor, new_critic, new_target_critic, new_temp, info
+        return (
+            step,
+            new_rng,
+            new_actor,
+            new_critic,
+            new_target_critic,
+            new_temp,
+            info,
+        ), ema_diagnostics
 
-    step, rng, actor, critic, target_critic, temp, info = one_step(0, (step, rng, actor, critic, target_critic, temp, {}))
-    return jax.lax.fori_loop(1, num_updates, one_step, (step, rng, actor, critic, target_critic, temp, info))
+    initial_state = (step, rng, actor, critic, target_critic, temp, {})
+    if num_updates == 1:
+        state, ema_diagnostics = run_update(
+            0, initial_state, collect_target_ema_diagnostics
+        )
+        return (*state, ema_diagnostics)
+
+    state, _ = run_update(0, initial_state, False)
+
+    def one_step(i, current_state):
+        return run_update(i, current_state, False)[0]
+
+    state = jax.lax.fori_loop(1, num_updates - 1, one_step, state)
+    state, ema_diagnostics = run_update(
+        num_updates - 1, state, collect_target_ema_diagnostics
+    )
+    return (*state, ema_diagnostics)
 
 class BRC(object):
     def __init__(
@@ -254,6 +411,7 @@ class BRC(object):
         v_max: float = 10.0,
         task_embedding_norm: str = 'l2',
         critic_precision: str = 'fp32',
+        target_critic_precision: str = 'fp32',
         fp8_amax_history_length: int = 1024,
     ) -> None:
         
@@ -267,6 +425,7 @@ class BRC(object):
         self.v_max = v_max
         self.task_embedding_norm = task_embedding_norm
         self.critic_precision = critic_precision
+        self.target_critic_precision = target_critic_precision
         self.fp8_amax_history_length = fp8_amax_history_length
         
         self.num_tasks = num_tasks
@@ -304,19 +463,32 @@ class BRC(object):
                 output_nodes=num_bins,
                 multitask=self.multitask,
                 task_embedding_norm=task_embedding_norm,
-                critic_precision='fp32',
+                critic_precision=target_critic_precision,
             )
             actor = Model.create(actor_def, inputs=[actor_key, actor_init], tx=optax.adamw(learning_rate=actor_lr))
             critic = Model.create(critic_def, inputs=[critic_key, observations, actions, task_ids_init], tx=optax.adamw(learning_rate=critic_lr))
             target_critic = Model.create(target_critic_def, inputs=[critic_key, observations, actions, task_ids_init])
+            target_critic = initialize_target_critic(critic, target_critic)
             temp = Model.create(Temperature(init_temperature), inputs=[temp_key], tx=optax.adam(learning_rate=temp_lr, b1=0.5))
             return actor, critic, target_critic, temp, rng
 
         self.init_models = jax.jit(_init_models)
         self.actor, self.critic, self.target_critic, self.temp, self.rng = self.init_models(self.seed)
+        self.target_critic_reference_def = Critic(
+            num_tasks=num_tasks,
+            embedding_size=embedding_size,
+            ensemble_size=ensemble_size,
+            hidden_dims=width_critic,
+            depth=2,
+            output_nodes=num_bins,
+            multitask=self.multitask,
+            task_embedding_norm=task_embedding_norm,
+            critic_precision='fp32',
+        )
         self.normalizer_rng = jax.random.PRNGKey(self.seed + 104729)
         self.task_entropies = jnp.full((num_tasks,), self.target_entropy, dtype=jnp.float32)
         self.task_entropy_counts = jnp.zeros((num_tasks,), dtype=jnp.int32)
+        self.last_target_ema_diagnostics = None
         self.step = 1
 
     def sample_actions(self, observations: np.ndarray, temperature: float = 1.0):
@@ -326,9 +498,24 @@ class BRC(object):
         actions = np.asarray(actions)
         return np.clip(actions, -1, 1)
     
-    def update(self, batch: Batch, num_updates: int, env_step: int):
+    def update(
+        self,
+        batch: Batch,
+        num_updates: int,
+        env_step: int,
+        collect_target_ema_diagnostics: bool = False,
+    ):
 
-        step, rng, actor, critic, target_critic, temp, info = _do_multiple_updates(
+        (
+            step,
+            rng,
+            actor,
+            critic,
+            target_critic,
+            temp,
+            info,
+            ema_diagnostics,
+        ) = _do_multiple_updates(
             self.rng,
             self.actor,
             self.critic,
@@ -343,7 +530,8 @@ class BRC(object):
             self.multitask,
             self.num_tasks,
             self.step,
-            num_updates
+            num_updates,
+            collect_target_ema_diagnostics,
         )
         entropy_by_task = info.pop('_entropy_by_task')
         entropy_counts = info.pop('_entropy_counts_by_task')
@@ -357,6 +545,9 @@ class BRC(object):
         self.critic = critic
         self.target_critic = target_critic
         self.temp = temp
+        self.last_target_ema_diagnostics = (
+            ema_diagnostics if collect_target_ema_diagnostics else None
+        )
         return info
     
     def get_infos(self, batch: Batch):
@@ -400,8 +591,23 @@ class BRC(object):
 
     def get_tensor_diagnostics(self, batch: Batch):
         """Return device-resident trees used only at tensor-stat intervals."""
+        target_params = dequantize_target_params(self.target_critic)
+        target_reference = None
+        if self.target_critic.fp8_meta is not None:
+            target_reference = self.target_critic.replace(
+                apply_fn=self.target_critic_reference_def,
+                params=target_params,
+                fp8_meta=None,
+            )
         forward = _get_forward_diagnostics(
-            self.actor, self.critic, batch, self.multitask
+            self.actor,
+            self.critic,
+            self.target_critic,
+            target_reference,
+            batch,
+            self.multitask,
+            self.num_bins,
+            self.v_max,
         )
         gradients = _get_gradient_diagnostics(
             self.rng,
@@ -419,7 +625,7 @@ class BRC(object):
             'params': {
                 'actor': self.actor.params,
                 'critic': self.critic.params,
-                'target_critic': self.target_critic.params,
+                'target_critic_dequantized': target_params,
                 'temperature': self.temp.params,
             },
             'optimizer': {
@@ -432,6 +638,30 @@ class BRC(object):
         }
         if self.critic.fp8_meta is not None:
             diagnostics['fp8'] = self._fp8_diagnostics()
+        if self.target_critic.fp8_meta is not None:
+            target_params_flat = traverse_util.flatten_dict(
+                self.target_critic.params, sep='/'
+            )
+            target_meta_flat = traverse_util.flatten_dict(
+                self.target_critic.fp8_meta, sep='/'
+            )
+            target_storage = {
+                'codes': _split_ensemble_arrays({
+                    path: value
+                    for path, value in target_params_flat.items()
+                    if value.dtype == jnp.float8_e4m3fn
+                }),
+                'kernel_scales': _split_ensemble_arrays({
+                    path: value
+                    for path, value in target_meta_flat.items()
+                    if path.endswith('/kernel_scale')
+                }),
+            }
+            if self.last_target_ema_diagnostics is not None:
+                target_storage['last_applied_ema'] = (
+                    self.last_target_ema_diagnostics
+                )
+            diagnostics['fp8_target_storage'] = target_storage
         return diagnostics
 
     def _fp8_diagnostics(self):
@@ -479,9 +709,13 @@ class BRC(object):
     def load(self, path):
         import os
         import pickle
+        target_critic = self.target_critic.load(
+            f'{path}/target_critic.msgpack',
+            require_fp8_metadata=self.target_critic_precision == 'fp8_resident',
+        )
         self.actor = self.actor.load(f'{path}/actor.msgpack')
         self.critic = self.critic.load(f'{path}/critic.msgpack')
-        self.target_critic = self.target_critic.load(f'{path}/target_critic.msgpack')
+        self.target_critic = target_critic
         self.temp = self.temp.load(f'{path}/temp.msgpack')
         state_path = f'{path}/agent_state.pkl'
         if os.path.exists(state_path):

@@ -112,11 +112,13 @@ class Model:
                 fp8_meta=self.fp8_meta,
             )))
 
-    def load(self, load_path: str):
+    def load(self, load_path: str, require_fp8_metadata: bool = False):
         with open(load_path, 'rb') as f:
             contents = f.read()
         raw_state = flax.serialization.msgpack_restore(contents)
         source_has_fp8 = raw_state.get('fp8_meta') is not None
+        if require_fp8_metadata and not source_has_fp8:
+            raise ValueError('checkpoint is missing required FP8 model metadata')
         if source_has_fp8 and self.fp8_meta is None:
             raise ValueError('cannot load an FP8 model state into an FP32 model')
         target_opt_state = self.opt_state if raw_state.get('opt_state') is not None else None

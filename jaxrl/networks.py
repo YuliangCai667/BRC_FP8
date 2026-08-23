@@ -1,21 +1,103 @@
 import functools
 from typing import Callable
 
+from jax import lax
 import jax.numpy as jnp
 import flax.linen as nn
 from flax.linen.fp8_ops import OVERWRITE_WITH_GRADIENT
 import distrax
 
+
+E4M3_MAX = jnp.float32(448.0)
+
+
+def _e4m3_amax_and_scale(value: jnp.ndarray):
+    value = jnp.asarray(value, dtype=jnp.float32)
+    amax = jnp.max(jnp.abs(value))
+    scale = jnp.where(amax > 0, amax / E4M3_MAX, jnp.float32(1.0))
+    return amax, scale
+
+
+def quantize_e4m3_per_tensor(value: jnp.ndarray):
+    value = jnp.asarray(value, dtype=jnp.float32)
+    _, scale = _e4m3_amax_and_scale(value)
+    return (value / scale).astype(jnp.float8_e4m3fn), scale
+
+
+def dequantize_e4m3(codes: jnp.ndarray, scale: jnp.ndarray):
+    scale = jnp.asarray(scale, dtype=jnp.float32)
+    scale = jnp.reshape(scale, scale.shape + (1,) * (codes.ndim - scale.ndim))
+    return codes.astype(jnp.float32) * scale
+
+
 def default_init(scale: float = jnp.sqrt(2)):
     return nn.initializers.orthogonal(scale)
+
+
+class ResidentFp8Dense(nn.Module):
+    features: int
+    kernel_init: Callable = default_init()
+    bias_init: Callable = nn.initializers.zeros_init()
+
+    @nn.compact
+    def __call__(self, inputs: jnp.ndarray):
+        kernel_shape = (inputs.shape[-1], self.features)
+        if self.has_variable('params', 'kernel'):
+            initial_kernel = jnp.zeros(kernel_shape, dtype=jnp.float8_e4m3fn)
+            initial_scale = jnp.float32(1.0)
+        else:
+            fp32_kernel = self.kernel_init(
+                self.make_rng('params'), kernel_shape, jnp.float32
+            )
+            initial_kernel, initial_scale = quantize_e4m3_per_tensor(fp32_kernel)
+
+        kernel = self.param(
+            'kernel',
+            lambda _key, _shape, _dtype: initial_kernel,
+            kernel_shape,
+            jnp.float8_e4m3fn,
+        )
+        kernel_scale = self.variable(
+            OVERWRITE_WITH_GRADIENT,
+            'kernel_scale',
+            lambda: initial_scale,
+        ).value
+        bias = self.param(
+            'bias', self.bias_init, (self.features,), jnp.float32
+        )
+
+        inputs = jnp.asarray(inputs, dtype=jnp.float32)
+        activation_amax, activation_scale = _e4m3_amax_and_scale(inputs)
+        activation_codes = (inputs / activation_scale).astype(jnp.float8_e4m3fn)
+        outputs = lax.dot_general(
+            activation_codes,
+            kernel,
+            (((activation_codes.ndim - 1,), (0,)), ((), ())),
+            preferred_element_type=jnp.float32,
+        )
+        outputs *= activation_scale * jnp.asarray(kernel_scale, dtype=jnp.float32)
+        outputs += jnp.reshape(bias, (1,) * (outputs.ndim - 1) + (-1,))
+
+        self.sow('intermediates', 'activation', inputs)
+        self.sow('intermediates', 'activation_amax', activation_amax)
+        self.sow('intermediates', 'activation_scale', activation_scale)
+        return outputs
+
 
 class BronetBlock(nn.Module):
     hidden_dims: int
     activations: Callable[[jnp.ndarray], jnp.ndarray]
     fp8_direct: bool = False
+    fp8_resident: bool = False
     fp8_amax_history_length: int = 1024
 
-    def _dense(self):
+    def _dense(self, name: str):
+        if self.fp8_resident:
+            return ResidentFp8Dense(
+                self.hidden_dims,
+                kernel_init=default_init(),
+                name=name,
+            )
         if not self.fp8_direct:
             return nn.Dense(self.hidden_dims, kernel_init=default_init())
         return nn.Dense(
@@ -29,11 +111,11 @@ class BronetBlock(nn.Module):
 
     @nn.compact
     def __call__(self, x: jnp.ndarray):
-        res = self._dense()(x)
+        res = self._dense('Dense_0')(x)
         self.sow('intermediates', 'dense_0_output', res)
         res = nn.LayerNorm()(res)
         res = self.activations(res)
-        res = self._dense()(res)
+        res = self._dense('Dense_1')(res)
         self.sow('intermediates', 'dense_1_output', res)
         res = nn.LayerNorm()(res)
         return res + x
@@ -45,6 +127,7 @@ class BroNet(nn.Module):
     output_nodes: int = 101
     activations: Callable[[jnp.ndarray], jnp.ndarray] = nn.relu
     fp8_residual_blocks: bool = False
+    resident_fp8_residual_blocks: bool = False
     fp8_amax_history_length: int = 1024
 
     @nn.compact
@@ -58,6 +141,7 @@ class BroNet(nn.Module):
                 self.hidden_dims,
                 self.activations,
                 fp8_direct=self.fp8_residual_blocks,
+                fp8_resident=self.resident_fp8_residual_blocks,
                 fp8_amax_history_length=self.fp8_amax_history_length,
             )(x)
         if self.add_final_layer:
@@ -96,6 +180,7 @@ class QValue(nn.Module):
             add_final_layer=True,
             output_nodes=self.output_nodes,
             fp8_residual_blocks=self.critic_precision == 'fp8_direct',
+            resident_fp8_residual_blocks=self.critic_precision == 'fp8_resident',
             fp8_amax_history_length=self.fp8_amax_history_length,
         )
 
@@ -114,7 +199,7 @@ class QValueEnsemble(nn.Module):
     
     def setup(self):
         variable_axes = {'params': 0, 'intermediates': 0}
-        if self.critic_precision == 'fp8_direct':
+        if self.critic_precision in ('fp8_direct', 'fp8_resident'):
             variable_axes[OVERWRITE_WITH_GRADIENT] = 0
         VmapCritic = nn.vmap(QValue,
                              variable_axes=variable_axes,

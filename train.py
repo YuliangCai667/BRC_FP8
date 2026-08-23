@@ -45,9 +45,13 @@ flags.DEFINE_enum(
     'critic_precision', 'fp32', ['fp32', 'fp8_direct'],
     'Precision used by the online critic residual-block Dense layers.',
 )
+flags.DEFINE_enum(
+    'target_critic_precision', 'fp32', ['fp32', 'fp8_resident'],
+    'Precision used by the target critic residual-block Dense kernels.',
+)
 flags.DEFINE_integer(
     'fp8_amax_history_length', 1024,
-    'Per-tensor FP8 amax history length.',
+    'Online fp8_direct per-tensor amax history length.',
 )
 flags.DEFINE_boolean(
     'paper_alignment', False,
@@ -170,6 +174,23 @@ def main(_):
     )
     config = FLAGS.flag_values_dict()
     config.update({f'resolved_{key}': value for key, value in resolved_alignment.items()})
+    config.update({
+        'resolved_target_fp8_storage_scope': (
+            'residual_dense_kernels'
+            if FLAGS.target_critic_precision == 'fp8_resident'
+            else 'none'
+        ),
+        'resolved_target_fp8_weight_scaling': (
+            'dynamic_current_amax_per_tensor'
+            if FLAGS.target_critic_precision == 'fp8_resident'
+            else 'none'
+        ),
+        'resolved_target_fp8_activation_scaling': (
+            'current_amax_per_tensor'
+            if FLAGS.target_critic_precision == 'fp8_resident'
+            else 'none'
+        ),
+    })
     env_names = get_environment_list(FLAGS.env_names)
     resume_manifest = None
     resume_checkpoint = None
@@ -254,6 +275,7 @@ def main(_):
             width_critic=FLAGS.width_critic,
             task_embedding_norm=resolved_alignment['task_embedding_norm'],
             critic_precision=FLAGS.critic_precision,
+            target_critic_precision=FLAGS.target_critic_precision,
             fp8_amax_history_length=FLAGS.fp8_amax_history_length,
         )
         resource_devices = tuple(jax.devices())
@@ -385,7 +407,16 @@ def main(_):
                     profile['replay_sample_sec'] = time.perf_counter() - start
 
                 start = time.perf_counter()
-                latest_update_info = agent.update(batches, FLAGS.updates_per_step, i)
+                latest_update_info = agent.update(
+                    batches,
+                    FLAGS.updates_per_step,
+                    i,
+                    collect_target_ema_diagnostics=(
+                        FLAGS.target_critic_precision == 'fp8_resident'
+                        and FLAGS.tensor_stats_interval > 0
+                        and i % FLAGS.tensor_stats_interval == 0
+                    ),
+                )
                 if first_update_sec is None or profiling:
                     _block_tree(latest_update_info)
                 if first_update_sec is None:
@@ -427,6 +458,9 @@ def main(_):
                     'action_std': float(np.std(actions)),
                     'action_saturation_fraction': float(np.mean(np.abs(actions) >= 0.99)),
                     'fp8_direct_enabled': float(FLAGS.critic_precision == 'fp8_direct'),
+                    'target_fp8_resident_enabled': float(
+                        FLAGS.target_critic_precision == 'fp8_resident'
+                    ),
                     'window_train_sec': active_sec,
                     'env_steps_per_sec': active_steps / active_sec,
                     'transitions_per_sec': active_steps * num_tasks / active_sec,
