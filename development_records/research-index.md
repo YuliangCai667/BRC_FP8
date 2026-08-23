@@ -4,6 +4,7 @@
 - 方向：在 Blackwell 上把 BRC 从原生 FP8 Critic 计算逐步扩展到低精度持久训练状态。
 - 代码范围：`/home/caiyuliang/BRC_FP8_blackwell_fp8`，`codex/blackwell-fp8-direct`。
 - 当前常驻目标实现：`f88b6628d39caec72f48e0e22d4d8dde815d1745`，已推送到对应远端分支。
+- 当前目标 FP8 前向 / FP32 存储实现：`186d153ea8f715b6a2aa18be6c50881b3d03f3dc`，已推送到对应远端分支。
 - 当前目标：验证目标 Critic 残差核心常驻 FP8 后，逐步 EMA 是否被量化格点吞掉，以及 bootstrap 前向误差是否影响稳定性。
 
 ## 文档登记
@@ -32,5 +33,5 @@
 - `EXP-FP8-TARGET-D-S42`：GPU3 旧段按迁移要求主动停止于 env step 10,057 / update 10,115；W&B `fb02bf23`，无 checkpoint，不作为完整正式结果。
 - `EXP-FP8-TARGET-D-S42-R1`：运行中；在线 FP8 Direct、目标残差核心常驻 FP8，在 GPU1 从头重启，W&B `iwlomjbu`；step 5,000 首次更新有限且无 NaN/Inf。
 - `EXP-FP8-TARGET-FWD-SMOKE`：GPU2 已完成；200 steps / 203 updates，无 NaN/Inf，目标 FP8 scale/amax 与 FP32-reference 误差统计完整。
-- `EXP-FP8-TARGET-FWD-S42`：计划在 GPU2 启动；在线/目标均 FP8 Direct，目标参数与 EMA 保持 FP32，用于分离目标前向计算误差与常驻存储/EMA 误差。
+- `EXP-FP8-TARGET-FWD-S42`：运行中；在线/目标均 FP8 Direct，目标参数与 EMA 保持 FP32，GPU2，W&B `gij6jhgd`；step 5,000 首次更新有限且无 NaN/Inf。
 - 下一决策门：只在 C/D 证明存在明显吞更新或训练不稳定后，选择更新频率匹配、Kahan、随机舍入或其他修正；当前不预埋任何修正。

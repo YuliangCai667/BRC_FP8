@@ -24,7 +24,7 @@
 | 2026-08-24 00:24 | `brc_dmc_dogs_d_target_fp8_resident_s42` / `fb02bf23` | 主动停止 | `EXP-FP8-TARGET-D-S42`：在线 FP8 Direct、目标残差 kernel 常驻 FP8 | 42 / GPU 3 | `codex/blackwell-fp8-direct` @ `f88b662`，clean | 00:32:38 按用户要求迁移 GPU；停止于 env step 10,057 / update 10,115；无 checkpoint，不作为完整正式结果 |
 | 2026-08-24 00:33 | `brc_dmc_dogs_d_target_fp8_resident_s42_gpu1_r1` / `iwlomjbu` | 运行中 | `EXP-FP8-TARGET-D-S42-R1`：D 在 GPU1 从头重启 | 42 / GPU 1（与既有任务共享） | `codex/blackwell-fp8-direct` @ `1ff6625`，clean；训练代码同 `f88b662` | 正式 Dogs 500k；step 5k 首次更新有限、无 NaN/Inf；对照 B 最终 816.37 |
 | 2026-08-24 01:16 | `brc_cheetah_run_target_fp8_direct_fp32_storage_s0_smoke` | 完成 | `EXP-FP8-TARGET-FWD-SMOKE`：目标 FP8 Direct 前向、FP32 存储短跑 | 0 / GPU 2（与既有任务共享） | `1eecc56` + 本轮未提交实现 | 200 steps / 203 updates；无 NaN/Inf；298 条 tensor stats；验收通过 |
-| 提交后 | `brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2` | 计划中 | `EXP-FP8-TARGET-FWD-S42`：在线/目标 FP8 Direct，目标 FP32 存储与 EMA | 42 / GPU 2（与既有 MetaWorld 任务共享） | 待本轮实现形成 clean commit | 正式 Dogs 500k；比较 B 与 D-R1，仅作稳定性/学习结论 |
+| 2026-08-24 01:24 | `brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2` / `gij6jhgd` | 运行中 | `EXP-FP8-TARGET-FWD-S42`：在线/目标 FP8 Direct，目标 FP32 存储与 EMA | 42 / GPU 2（与既有 MetaWorld 任务共享） | `codex/blackwell-fp8-direct` @ `186d153`，clean | 正式 Dogs 500k；step 5k 首次更新有限、无 NaN/Inf；比较 B 与 D-R1 |
 
 ## 已完成：原始 BRC 三种子基线
 
@@ -391,11 +391,12 @@ env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 CUDA_HOME=/usr/local/cuda-
 
 ### `EXP-FP8-TARGET-FWD-S42` — 目标 FP8 计算 / FP32 存储正式对照
 
-- 状态：计划中；待本轮实现形成并推送 clean commit 后在 GPU2 启动。
+- 状态：运行中；2026-08-24 01:24:39 Asia/Shanghai 在 GPU2 的独立 tmux 中启动。
 - 目的：在线 Critic 保持现有 FP8 Direct；目标 Critic 的四个残差 Dense 同样采用 FP8 Direct，但全部目标参数与逐步 EMA 保持 FP32。相对 B 只增加目标 FP8 前向；相对 D-R1 只移除常驻 E4M3 存储与 requantized EMA。
 - 协议：逐项复用 A/B/C/D 的 Dogs seed-42 正式协议：500k steps、start 5k、replay 1M、batch 1024、2 updates/step、width 4096、paper alignment、reward-mean bootstrap、25k eval/tensor stats、50k analysis checkpoint、100k recovery checkpoint。
-- 运行：GPU2，与既有 MetaWorld seed-123 训练共享；tmux、run ID 与 W&B name 均预定为 `brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2`。因此只比较数值稳定性和学习/eval，不比较 wall clock、功耗或吞吐。
+- 运行：GPU2，与既有 MetaWorld seed-123 训练共享；tmux、run ID 与 W&B name 均为 `brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2`；[W&B `gij6jhgd`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/gij6jhgd)。因此只比较数值稳定性和学习/eval，不比较 wall clock、功耗或吞吐。
 - 决策门：没有预设 return 阈值；完成后先核对协议和有限值，再以 B → 本组判断目标 bootstrap 计算误差，以本组 → D-R1 判断持久 FP8 存储/EMA 的增量影响。
+- 启动验证：metadata 为 clean `186d153`；CUDA root/home 与 `ptxas 12.8.61` 均来自 `/usr/local/cuda-12.8`。配置解析为 online/target `fp8_direct`、四个目标残差 Dense FP8 compute、全部目标参数 FP32、delayed per-tensor scaling、仅 bootstrap 前向推进 input/kernel scale state。tmux、PID `71842`、物理 GPU2 绑定、run 目录、W&B ID 和两个初始化事件均已核对。step 5,000 的首次更新完成：critic loss `23.059`、critic grad norm `19.649`、actor loss `26.913`、actor grad norm `22.356`，`update_nan_count=0`、`update_inf_count=0`。
 
 ```bash
 tmux new-session -d -s brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2 \
