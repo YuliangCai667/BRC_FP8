@@ -60,7 +60,11 @@ def validate_checkpoint_config(previous: Mapping[str, Any], current: Mapping[str
     for key in RESUME_CONFIG_KEYS:
         if key in ("critic_precision", "target_critic_precision"):
             continue
-        if key == "fp8_amax_history_length" and old_precision != "fp8_direct":
+        if (
+            key == "fp8_amax_history_length"
+            and old_precision != "fp8_direct"
+            and old_target_precision != "fp8_direct"
+        ):
             continue
         old = checkpoint_config_value(previous, key)
         new = checkpoint_config_value(current, key)

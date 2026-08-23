@@ -23,6 +23,8 @@
 | 2026-08-24 00:24 | `brc_dmc_dogs_c_target_fp8_resident_s42` / `trzg1mjw` | 运行中 | `EXP-FP8-TARGET-C-S42`：在线 FP32、目标残差 kernel 常驻 FP8 | 42 / GPU 3 | `codex/blackwell-fp8-direct` @ `f88b662`，clean | 正式 Dogs 500k；step 5k 首次更新有限、无 NaN/Inf；对照 A 最终 794.40 |
 | 2026-08-24 00:24 | `brc_dmc_dogs_d_target_fp8_resident_s42` / `fb02bf23` | 主动停止 | `EXP-FP8-TARGET-D-S42`：在线 FP8 Direct、目标残差 kernel 常驻 FP8 | 42 / GPU 3 | `codex/blackwell-fp8-direct` @ `f88b662`，clean | 00:32:38 按用户要求迁移 GPU；停止于 env step 10,057 / update 10,115；无 checkpoint，不作为完整正式结果 |
 | 2026-08-24 00:33 | `brc_dmc_dogs_d_target_fp8_resident_s42_gpu1_r1` / `iwlomjbu` | 运行中 | `EXP-FP8-TARGET-D-S42-R1`：D 在 GPU1 从头重启 | 42 / GPU 1（与既有任务共享） | `codex/blackwell-fp8-direct` @ `1ff6625`，clean；训练代码同 `f88b662` | 正式 Dogs 500k；step 5k 首次更新有限、无 NaN/Inf；对照 B 最终 816.37 |
+| 2026-08-24 01:16 | `brc_cheetah_run_target_fp8_direct_fp32_storage_s0_smoke` | 完成 | `EXP-FP8-TARGET-FWD-SMOKE`：目标 FP8 Direct 前向、FP32 存储短跑 | 0 / GPU 2（与既有任务共享） | `1eecc56` + 本轮未提交实现 | 200 steps / 203 updates；无 NaN/Inf；298 条 tensor stats；验收通过 |
+| 提交后 | `brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2` | 计划中 | `EXP-FP8-TARGET-FWD-S42`：在线/目标 FP8 Direct，目标 FP32 存储与 EMA | 42 / GPU 2（与既有 MetaWorld 任务共享） | 待本轮实现形成 clean commit | 正式 Dogs 500k；比较 B 与 D-R1，仅作稳定性/学习结论 |
 
 ## 已完成：原始 BRC 三种子基线
 
@@ -375,6 +377,53 @@ tmux new-session -d -s brc_dmc_dogs_d_target_fp8_resident_s42_gpu1_r1 \
 ```
 
 当前启动门已满足：C 的 tmux/训练进程仍绑定 GPU3，D-R1 的 tmux/训练进程绑定 GPU1；两个 run 均已完成首次更新，精度配置和 W&B ID 均已核对。由于 GPU1 上还有既有任务，且两组运行环境不同，本轮继续只分析数值稳定性和学习效果，不据此比较 wall clock、功耗或吞吐。
+
+### `EXP-FP8-TARGET-FWD-SMOKE` — 目标 FP8 计算 / FP32 存储短跑
+
+- 状态：完成；2026-08-24 01:16 Asia/Shanghai 在 GPU2 前台运行。GPU2 同时有既有 MetaWorld seed-123 任务，因此 wall clock 与吞吐不作为证据。
+- 目的：验证目标 Critic 四个残差 Dense 使用 `fp8_direct` 原生前向时，参数和 `tau=0.005` EMA 仍为 FP32，input/kernel delayed-scaling 状态能随 bootstrap 更新，且不引入目标 backward。
+- 版本：`1eecc56` 加本轮未提交实现；只作实现验收。配置解析为 `critic_precision=fp8_direct`、`target_critic_precision=fp8_direct`、目标 FP8 compute scope 为 residual Dense、全部目标参数存储为 FP32。
+- 结果：`cheetah-run` seed 0、width 512、batch 256、200 steps、203 learner updates 正常写入 `run_finished`。全部训练采样点 `update_nan_count=0`、`update_inf_count=0`；step 150 写入 298 条 tensor stats，四层目标 input/kernel scale/amax 与 FP32-reference error 均非空且有限。aggregate expected-Q MAE `0.0704`、signed bias `-0.0441`、probability JS divergence `9.09e-4`，仅作为 smoke 数值证据。
+
+```bash
+env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 CUDA_HOME=/usr/local/cuda-12.8 PATH=/usr/local/cuda-12.8/bin:/usr/bin:/bin CUDA_VISIBLE_DEVICES=2 XLA_PYTHON_CLIENT_PREALLOCATE=false /home/caiyuliang/anaconda3/envs/brc/bin/python train.py --env_names=cheetah-run --seed=0 --eval_seed_offset=0 --max_steps=200 --start_training=100 --replay_buffer_size=2000 --batch_size=256 --updates_per_step=2 --width_critic=512 --critic_precision=fp8_direct --target_critic_precision=fp8_direct --fp8_amax_history_length=1024 --paper_alignment=true --return_bootstrap=reward_mean --eval_interval=0 --eval_episodes=1 --offline_evaluation=true --render=false --log_to_wandb=false --run_root=runs --run_id=brc_cheetah_run_target_fp8_direct_fp32_storage_s0_smoke --metrics_interval=25 --metrics_flush_interval=25 --system_metrics_interval_sec=10 --profile_interval=0 --tensor_stats_interval=150 --analysis_checkpoint_interval=0 --recovery_checkpoint_interval=0 --keep_last_analysis_checkpoints=0 --keep_last_recovery_checkpoints=0 --save_replay_buffer=false
+```
+
+### `EXP-FP8-TARGET-FWD-S42` — 目标 FP8 计算 / FP32 存储正式对照
+
+- 状态：计划中；待本轮实现形成并推送 clean commit 后在 GPU2 启动。
+- 目的：在线 Critic 保持现有 FP8 Direct；目标 Critic 的四个残差 Dense 同样采用 FP8 Direct，但全部目标参数与逐步 EMA 保持 FP32。相对 B 只增加目标 FP8 前向；相对 D-R1 只移除常驻 E4M3 存储与 requantized EMA。
+- 协议：逐项复用 A/B/C/D 的 Dogs seed-42 正式协议：500k steps、start 5k、replay 1M、batch 1024、2 updates/step、width 4096、paper alignment、reward-mean bootstrap、25k eval/tensor stats、50k analysis checkpoint、100k recovery checkpoint。
+- 运行：GPU2，与既有 MetaWorld seed-123 训练共享；tmux、run ID 与 W&B name 均预定为 `brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2`。因此只比较数值稳定性和学习/eval，不比较 wall clock、功耗或吞吐。
+- 决策门：没有预设 return 阈值；完成后先核对协议和有限值，再以 B → 本组判断目标 bootstrap 计算误差，以本组 → D-R1 判断持久 FP8 存储/EMA 的增量影响。
+
+```bash
+tmux new-session -d -s brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2 \
+  'env -u LD_LIBRARY_PATH bash -c "
+    cd /home/caiyuliang/BRC_FP8_blackwell_fp8 &&
+    export CUDA_ROOT=/usr/local/cuda-12.8 &&
+    export CUDA_HOME=/usr/local/cuda-12.8 &&
+    export PATH=/usr/local/cuda-12.8/bin:\$PATH &&
+    export CUDA_VISIBLE_DEVICES=2 &&
+    export XLA_PYTHON_CLIENT_PREALLOCATE=false &&
+    exec /home/caiyuliang/anaconda3/envs/brc/bin/python train.py \
+      --env_names=DMC_DOGS --seed=42 --eval_seed_offset=0 \
+      --max_steps=500000 --start_training=5000 \
+      --replay_buffer_size=1000000 --batch_size=1024 --updates_per_step=2 \
+      --width_critic=4096 --critic_precision=fp8_direct \
+      --target_critic_precision=fp8_direct --fp8_amax_history_length=1024 \
+      --paper_alignment=true --return_bootstrap=reward_mean \
+      --eval_interval=25000 --eval_episodes=10 --offline_evaluation=true \
+      --render=false --log_to_wandb=true \
+      --wandb_name=brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2 \
+      --run_root=runs --run_id=brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2 \
+      --metrics_interval=1000 --metrics_flush_interval=1000 \
+      --system_metrics_interval_sec=10 --profile_interval=25000 --profile_window=10 \
+      --tensor_stats_interval=25000 --analysis_checkpoint_interval=50000 \
+      --recovery_checkpoint_interval=100000 --keep_last_analysis_checkpoints=2 \
+      --keep_last_recovery_checkpoints=1 --save_replay_buffer=true
+  "'
+```
 
 ## 更新规则
 

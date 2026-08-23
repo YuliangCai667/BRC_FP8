@@ -249,6 +249,86 @@ class Fp8CriticTest(unittest.TestCase):
             )
         ))
 
+    def test_direct_target_uses_fp32_storage_and_advances_forward_metadata(self):
+        agent = make_agent('fp8_direct', 'fp8_direct')
+        initial_params = jax.tree.map(
+            lambda value: np.asarray(value).copy(), agent.target_critic.params
+        )
+        initial_meta = traverse_util.flatten_dict(agent.target_critic.fp8_meta)
+
+        self.assertIsNone(agent.target_critic.opt_state)
+        self.assertTrue(all(
+            leaf.dtype == np.dtype(np.float32)
+            for leaf in jax.tree_util.tree_leaves(agent.target_critic.params)
+        ))
+        assert_trees_equal(self, agent.critic.params, agent.target_critic.params)
+        self.assertTrue(all(
+            value.dtype == np.dtype(np.float32)
+            for value in initial_meta.values()
+        ))
+
+        info = agent.update(make_batch(), 1, env_step=1)
+        jax.block_until_ready(info)
+        updated_meta = traverse_util.flatten_dict(agent.target_critic.fp8_meta)
+        for path, before in initial_meta.items():
+            after = updated_meta[path]
+            if 'output_grad' in path[-1]:
+                np.testing.assert_array_equal(after, before)
+            elif path[-1].endswith('_amax_history'):
+                self.assertGreater(np.count_nonzero(np.asarray(after)), 0)
+
+        initial_flat = traverse_util.flatten_dict(initial_params)
+        online_flat = traverse_util.flatten_dict(agent.critic.params)
+        target_flat = traverse_util.flatten_dict(agent.target_critic.params)
+        for path, initial in initial_flat.items():
+            np.testing.assert_allclose(
+                np.asarray(target_flat[path]),
+                np.asarray(online_flat[path] * 0.005 + initial * 0.995),
+                rtol=1e-7,
+                atol=1e-7,
+            )
+
+        meta_before_diagnostics = jax.tree.map(
+            lambda value: np.asarray(value).copy(), agent.target_critic.fp8_meta
+        )
+        probe = Batch(*[value[0] for value in make_batch()])
+        diagnostics = agent.get_tensor_diagnostics(probe)
+        jax.block_until_ready(diagnostics)
+        self.assertIn('fp8_target_forward', diagnostics)
+        self.assertNotIn('fp8_target_storage', diagnostics)
+        self.assertEqual(
+            set(diagnostics['target_forward_error']),
+            {'aggregate', 'ensemble_0', 'ensemble_1'},
+        )
+        assert_trees_equal(
+            self, meta_before_diagnostics, agent.target_critic.fp8_meta
+        )
+
+    def test_direct_target_checkpoint_round_trip_and_next_update(self):
+        source = make_agent('fp8_direct', 'fp8_direct')
+        batch = make_batch()
+        source.update(batch, 1, env_step=1)
+        with tempfile.TemporaryDirectory() as temp:
+            source.save(temp, include_optimizer=True)
+            restored = make_agent('fp8_direct', 'fp8_direct')
+            restored.load(temp)
+            assert_trees_equal(
+                self, source.target_critic.params, restored.target_critic.params
+            )
+            assert_trees_equal(
+                self, source.target_critic.fp8_meta, restored.target_critic.fp8_meta
+            )
+            source_info = source.update(batch, 1, env_step=2)
+            restored_info = restored.update(batch, 1, env_step=2)
+            jax.block_until_ready((source_info, restored_info))
+            assert_trees_equal(self, source_info, restored_info)
+            assert_trees_equal(
+                self, source.target_critic.params, restored.target_critic.params
+            )
+            assert_trees_equal(
+                self, source.target_critic.fp8_meta, restored.target_critic.fp8_meta
+            )
+
     def test_fp8_checkpoint_round_trip_and_next_update(self):
         source = make_agent('fp8_direct')
         batch = make_batch()
@@ -315,6 +395,14 @@ class Fp8CriticTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'required FP8 model metadata'):
                 restored.load(temp)
 
+    def test_direct_target_rejects_fp32_target_load(self):
+        source = make_agent('fp8_direct', 'fp32')
+        with tempfile.TemporaryDirectory() as temp:
+            source.save(temp, include_optimizer=True)
+            restored = make_agent('fp8_direct', 'fp8_direct')
+            with self.assertRaisesRegex(ValueError, 'required FP8 model metadata'):
+                restored.load(temp)
+
     def test_fp32_checkpoint_initializes_fresh_fp8_metadata(self):
         source = make_agent('fp32')
         source.update(make_batch(), 1, env_step=1)
@@ -352,6 +440,19 @@ class Fp8CriticTest(unittest.TestCase):
             validate_checkpoint_config(
                 {'target_critic_precision': 'fp8_resident'},
                 {'target_critic_precision': 'fp32'},
+            )
+        with self.assertRaises(ValueError):
+            validate_checkpoint_config(
+                {
+                    'critic_precision': 'fp32',
+                    'target_critic_precision': 'fp8_direct',
+                    'fp8_amax_history_length': 8,
+                },
+                {
+                    'critic_precision': 'fp32',
+                    'target_critic_precision': 'fp8_direct',
+                    'fp8_amax_history_length': 16,
+                },
             )
 
 

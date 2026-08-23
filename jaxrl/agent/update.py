@@ -2,6 +2,7 @@ import functools
 import jax.numpy as jnp
 import jax
 from flax import traverse_util
+from flax.linen.fp8_ops import OVERWRITE_WITH_GRADIENT
 
 from jaxrl.networks import dequantize_e4m3, quantize_e4m3_per_tensor
 from jaxrl.utils import Batch, Model, PRNGKey, tree_norm
@@ -27,9 +28,13 @@ def _dequantize_ensemble(codes, scales):
     return jax.vmap(dequantize_e4m3)(codes, scales)
 
 
+def _target_precision(target_critic: Model):
+    return target_critic.apply_fn.critic_precision
+
+
 def initialize_target_critic(critic: Model, target_critic: Model):
-    """Copy online parameters and quantize only resident target kernels."""
-    if target_critic.fp8_meta is None:
+    """Copy online parameters, quantizing only resident target kernels."""
+    if _target_precision(target_critic) != 'fp8_resident':
         return target_critic.replace(params=critic.params)
 
     params = traverse_util.flatten_dict(critic.params)
@@ -49,7 +54,7 @@ def initialize_target_critic(critic: Model, target_critic: Model):
 @jax.jit
 def dequantize_target_params(target_critic: Model):
     """Return an ephemeral FP32 parameter tree for low-frequency diagnostics."""
-    if target_critic.fp8_meta is None:
+    if _target_precision(target_critic) != 'fp8_resident':
         return target_critic.params
 
     params = traverse_util.flatten_dict(target_critic.params)
@@ -68,7 +73,7 @@ def target_ema_diagnostics(
     critic: Model, target_critic: Model, tau: float
 ):
     """Measure the EMA candidate for the supplied exact pre-update states."""
-    if target_critic.fp8_meta is None:
+    if _target_precision(target_critic) != 'fp8_resident':
         return {}
 
     online = traverse_util.flatten_dict(critic.params)
@@ -182,7 +187,21 @@ def update_critic(key: PRNGKey, actor: Model, critic: Model, target_critic: Mode
     inputs = build_actor_input(critic, batch.next_observations, batch.task_ids, multitask)
     dist = actor(inputs)
     next_actions, next_log_probs = dist.sample_and_log_prob(seed=key)
-    next_q_logits = target_critic(batch.next_observations, next_actions, batch.task_ids)
+    if _target_precision(target_critic) == 'fp8_direct':
+        next_q_logits, updated_variables = target_critic.apply_fn.apply(
+            target_critic.variables(),
+            batch.next_observations,
+            next_actions,
+            batch.task_ids,
+            mutable=[OVERWRITE_WITH_GRADIENT],
+        )
+        target_critic = target_critic.replace(
+            fp8_meta=updated_variables[OVERWRITE_WITH_GRADIENT]
+        )
+    else:
+        next_q_logits = target_critic(
+            batch.next_observations, next_actions, batch.task_ids
+        )
     next_q_probs = jax.nn.softmax(next_q_logits, axis=-1).mean(axis=0)
     v_min = -v_max
     bin_values = jnp.linspace(start=v_min, stop=v_max, num=num_bins)[None]
@@ -223,10 +242,10 @@ def update_critic(key: PRNGKey, actor: Model, critic: Model, target_critic: Mode
         }
     new_critic, info = critic.apply_gradient(critic_loss_fn)
     info["critic_gnorm"] = info.pop("grad_norm")
-    return new_critic, info
+    return new_critic, target_critic, info
 
 def update_target_critic(critic: Model, target_critic: Model, tau: float):
-    if target_critic.fp8_meta is not None:
+    if _target_precision(target_critic) == 'fp8_resident':
         online = traverse_util.flatten_dict(critic.params)
         target = traverse_util.flatten_dict(target_critic.params)
         metadata = traverse_util.flatten_dict(target_critic.fp8_meta)

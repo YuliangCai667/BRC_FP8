@@ -15,6 +15,7 @@
 | 实验台账 | [experiment-runs.md](experiment-runs.md) | 命令、运行状态、结果和混杂因素 | 2026-08-24 |
 | 在线 FP8 改动 | [2026-08-23-blackwell-fp8-direct.md](2026-08-23-blackwell-fp8-direct.md) | 当前 A/B 计算路径及验证证据 | 2026-08-23 |
 | 常驻目标 FP8 改动 | [2026-08-23-persistent-fp8-target-critic.md](2026-08-23-persistent-fp8-target-critic.md) | 本轮实现、验证与限制 | 2026-08-24 |
+| 目标 FP8 前向改动 | [2026-08-24-fp8-target-forward.md](2026-08-24-fp8-target-forward.md) | FP32 目标存储下的 FP8 bootstrap 前向消融 | 2026-08-24 |
 
 ## 已验证事实
 
@@ -22,6 +23,7 @@
 - DMC Dogs seed-42 的严格对照为 A（在线/目标 FP32，最终 eval return `794.40`）和 B（在线 FP8、目标 FP32，最终 `816.37`）。
 - 目标 Critic 每次以 `tau=0.005` 吸收最新在线 Critic，常驻 FP8 后会首次把这一小更新暴露给 E4M3 存储分辨率。
 - Blackwell 优化后 HLO 已确认四个目标残差 GEMM 直接以常驻 E4M3 参数作为 RHS，并输出 FP32；不存在每次前向的 RHS FP32→FP8 转换。
+- 目标 `fp8_direct` 控制保持全部目标参数和 EMA 为 FP32，只把四个目标残差 GEMM 转为 E4M3×E4M3→FP32；其 input/kernel delayed-scaling 状态只在训练 bootstrap 前向推进，不引入目标反向。
 
 ## 当前实验与决策门
 
@@ -29,4 +31,6 @@
 - `EXP-FP8-TARGET-C-S42`：运行中；在线 FP32、目标残差核心常驻 FP8，GPU3，W&B `trzg1mjw`。
 - `EXP-FP8-TARGET-D-S42`：GPU3 旧段按迁移要求主动停止于 env step 10,057 / update 10,115；W&B `fb02bf23`，无 checkpoint，不作为完整正式结果。
 - `EXP-FP8-TARGET-D-S42-R1`：运行中；在线 FP8 Direct、目标残差核心常驻 FP8，在 GPU1 从头重启，W&B `iwlomjbu`；step 5,000 首次更新有限且无 NaN/Inf。
+- `EXP-FP8-TARGET-FWD-SMOKE`：GPU2 已完成；200 steps / 203 updates，无 NaN/Inf，目标 FP8 scale/amax 与 FP32-reference 误差统计完整。
+- `EXP-FP8-TARGET-FWD-S42`：计划在 GPU2 启动；在线/目标均 FP8 Direct，目标参数与 EMA 保持 FP32，用于分离目标前向计算误差与常驻存储/EMA 误差。
 - 下一决策门：只在 C/D 证明存在明显吞更新或训练不稳定后，选择更新频率匹配、Kahan、随机舍入或其他修正；当前不预埋任何修正。

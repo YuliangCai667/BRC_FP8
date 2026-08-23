@@ -46,12 +46,14 @@ flags.DEFINE_enum(
     'Precision used by the online critic residual-block Dense layers.',
 )
 flags.DEFINE_enum(
-    'target_critic_precision', 'fp32', ['fp32', 'fp8_resident'],
-    'Precision used by the target critic residual-block Dense kernels.',
+    'target_critic_precision', 'fp32',
+    ['fp32', 'fp8_direct', 'fp8_resident'],
+    'Target critic residual Dense mode: FP32, FP8-direct compute with FP32 '
+    'parameters, or resident E4M3 kernels.',
 )
 flags.DEFINE_integer(
     'fp8_amax_history_length', 1024,
-    'Online fp8_direct per-tensor amax history length.',
+    'fp8_direct per-tensor amax history length.',
 )
 flags.DEFINE_boolean(
     'paper_alignment', False,
@@ -174,21 +176,49 @@ def main(_):
     )
     config = FLAGS.flag_values_dict()
     config.update({f'resolved_{key}': value for key, value in resolved_alignment.items()})
+    target_fp8_compute = FLAGS.target_critic_precision in (
+        'fp8_direct', 'fp8_resident'
+    )
     config.update({
+        'resolved_target_fp8_compute_scope': (
+            'residual_dense_kernels' if target_fp8_compute else 'none'
+        ),
         'resolved_target_fp8_storage_scope': (
             'residual_dense_kernels'
             if FLAGS.target_critic_precision == 'fp8_resident'
             else 'none'
         ),
+        'resolved_target_parameter_storage': (
+            'e4m3_residual_dense_kernels_otherwise_fp32'
+            if FLAGS.target_critic_precision == 'fp8_resident'
+            else 'fp32_all_parameters'
+        ),
         'resolved_target_fp8_weight_scaling': (
             'dynamic_current_amax_per_tensor'
             if FLAGS.target_critic_precision == 'fp8_resident'
-            else 'none'
+            else (
+                'delayed_amax_history_per_tensor'
+                if FLAGS.target_critic_precision == 'fp8_direct'
+                else 'none'
+            )
         ),
         'resolved_target_fp8_activation_scaling': (
             'current_amax_per_tensor'
             if FLAGS.target_critic_precision == 'fp8_resident'
-            else 'none'
+            else (
+                'delayed_amax_history_per_tensor'
+                if FLAGS.target_critic_precision == 'fp8_direct'
+                else 'none'
+            )
+        ),
+        'resolved_target_fp8_scale_state_update': (
+            'bootstrap_forward_input_kernel_only'
+            if FLAGS.target_critic_precision == 'fp8_direct'
+            else (
+                'ema_requantization_kernel_scale'
+                if FLAGS.target_critic_precision == 'fp8_resident'
+                else 'none'
+            )
         ),
     })
     env_names = get_environment_list(FLAGS.env_names)
@@ -458,6 +488,9 @@ def main(_):
                     'action_std': float(np.std(actions)),
                     'action_saturation_fraction': float(np.mean(np.abs(actions) >= 0.99)),
                     'fp8_direct_enabled': float(FLAGS.critic_precision == 'fp8_direct'),
+                    'target_fp8_direct_enabled': float(
+                        FLAGS.target_critic_precision == 'fp8_direct'
+                    ),
                     'target_fp8_resident_enabled': float(
                         FLAGS.target_critic_precision == 'fp8_resident'
                     ),

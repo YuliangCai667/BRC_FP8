@@ -41,7 +41,7 @@ def _get_infos(
     num_tasks: int,
 ):
     rng, actor_key, critic_key = jax.random.split(rng, 3)
-    _, critic_info = update_critic(critic_key, actor, critic, target_critic, temp, batch, discount, num_bins, v_max, multitask)
+    _, _, critic_info = update_critic(critic_key, actor, critic, target_critic, temp, batch, discount, num_bins, v_max, multitask)
     _, _, actor_info = update_actor(
         actor_key, actor, critic, temp, batch, num_bins, v_max, multitask, num_tasks
     )
@@ -297,7 +297,7 @@ def _update(
     collect_target_ema_diagnostics: bool,
 ):
     rng, actor_key, critic_key = jax.random.split(rng, 3)
-    new_critic, critic_info = update_critic(critic_key, actor, critic, target_critic, temp, batch, discount, num_bins, v_max, multitask)
+    new_critic, target_critic, critic_info = update_critic(critic_key, actor, critic, target_critic, temp, batch, discount, num_bins, v_max, multitask)
     ema_diagnostics = (
         target_ema_diagnostics(new_critic, target_critic, tau)
         if collect_target_ema_diagnostics
@@ -464,6 +464,7 @@ class BRC(object):
                 multitask=self.multitask,
                 task_embedding_norm=task_embedding_norm,
                 critic_precision=target_critic_precision,
+                fp8_amax_history_length=fp8_amax_history_length,
             )
             actor = Model.create(actor_def, inputs=[actor_key, actor_init], tx=optax.adamw(learning_rate=actor_lr))
             critic = Model.create(critic_def, inputs=[critic_key, observations, actions, task_ids_init], tx=optax.adamw(learning_rate=critic_lr))
@@ -637,8 +638,12 @@ class BRC(object):
             **forward,
         }
         if self.critic.fp8_meta is not None:
-            diagnostics['fp8'] = self._fp8_diagnostics()
-        if self.target_critic.fp8_meta is not None:
+            diagnostics['fp8'] = self._fp8_diagnostics(self.critic)
+        if self.target_critic_precision == 'fp8_direct':
+            diagnostics['fp8_target_forward'] = self._fp8_diagnostics(
+                self.target_critic, include_output_grad=False
+            )
+        if self.target_critic_precision == 'fp8_resident':
             target_params_flat = traverse_util.flatten_dict(
                 self.target_critic.params, sep='/'
             )
@@ -664,8 +669,8 @@ class BRC(object):
             diagnostics['fp8_target_storage'] = target_storage
         return diagnostics
 
-    def _fp8_diagnostics(self):
-        flat_meta = traverse_util.flatten_dict(self.critic.fp8_meta, sep='/')
+    def _fp8_diagnostics(self, model, include_output_grad=True):
+        flat_meta = traverse_util.flatten_dict(model.fp8_meta, sep='/')
         fp8_max = {
             'input': jnp.asarray(jnp.finfo(jnp.float8_e4m3fn).max, jnp.float32),
             'kernel': jnp.asarray(jnp.finfo(jnp.float8_e4m3fn).max, jnp.float32),
@@ -676,6 +681,8 @@ class BRC(object):
             if not path.endswith('_amax_history'):
                 continue
             kind = path.rsplit('/', 1)[-1].removesuffix('_amax_history')
+            if kind == 'output_grad' and not include_output_grad:
+                continue
             layer_path = path.rsplit('/', 1)[0]
             scale = flat_meta[f'{layer_path}/{kind}_scale'][..., 0]
             current_amax = history[..., 0]
@@ -711,7 +718,9 @@ class BRC(object):
         import pickle
         target_critic = self.target_critic.load(
             f'{path}/target_critic.msgpack',
-            require_fp8_metadata=self.target_critic_precision == 'fp8_resident',
+            require_fp8_metadata=(
+                self.target_critic_precision in ('fp8_direct', 'fp8_resident')
+            ),
         )
         self.actor = self.actor.load(f'{path}/actor.msgpack')
         self.critic = self.critic.load(f'{path}/critic.msgpack')

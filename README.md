@@ -61,14 +61,22 @@ dynamically quantized to E4M3, GEMMs accumulate and return FP32, and the origina
 requantized. There is no persistent FP32 target master, Kahan compensation,
 stochastic rounding, block scaling, or delayed target update in this mode.
 
+For a compute-only target ablation, use
+`--target_critic_precision=fp8_direct`. All target parameters and the EMA remain
+FP32, while the same four residual Dense operands are quantized to E4M3 for
+native FP8 GEMMs. Input and kernel per-tensor delayed-scaling histories advance
+once per training bootstrap forward; target diagnostics and evaluation are
+read-only, and no target backward pass is introduced.
+
 The controlled target experiments are:
 
 - C: `--critic_precision=fp32 --target_critic_precision=fp8_resident`
 - D: `--critic_precision=fp8_direct --target_critic_precision=fp8_resident`
+- Target-forward-only: `--critic_precision=fp8_direct --target_critic_precision=fp8_direct`
 
-Resident-target checkpoints support same-mode recovery only. Converting an
-existing FP32 target checkpoint to resident FP8 is intentionally unsupported in
-this first mechanism test.
+FP8-target checkpoints support same-mode recovery only. Converting an existing
+FP32 target checkpoint to either direct or resident FP8 is intentionally
+unsupported in these mechanism tests.
 
 For the paper-aligned MetaWorld configuration, run:
 

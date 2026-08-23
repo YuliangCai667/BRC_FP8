@@ -4,7 +4,7 @@ from typing import Callable
 from jax import lax
 import jax.numpy as jnp
 import flax.linen as nn
-from flax.linen.fp8_ops import OVERWRITE_WITH_GRADIENT
+from flax.linen.fp8_ops import OVERWRITE_WITH_GRADIENT, update_fp8_meta
 import distrax
 
 
@@ -32,6 +32,36 @@ def dequantize_e4m3(codes: jnp.ndarray, scale: jnp.ndarray):
 
 def default_init(scale: float = jnp.sqrt(2)):
     return nn.initializers.orthogonal(scale)
+
+
+class Fp8DirectDotGeneralOp(nn.Fp8DirectDotGeneralOp):
+    """Flax FP8 direct dot with optional forward-only metadata updates."""
+
+    def __call__(self, *args, **kwargs):
+        outputs = super().__call__(*args, **kwargs)
+        if (
+            self.is_mutable_collection(OVERWRITE_WITH_GRADIENT)
+            and not self.is_initializing()
+        ):
+            inputs, kernel = args[:2]
+            inputs = jnp.asarray(inputs, dtype=kernel.dtype)
+            input_scale, input_history = update_fp8_meta(
+                inputs,
+                self.e4m3_dtype,
+                self.input_scale.value,
+                self.input_amax_history.value,
+            )
+            kernel_scale, kernel_history = update_fp8_meta(
+                kernel,
+                self.e4m3_dtype,
+                self.kernel_scale.value,
+                self.kernel_amax_history.value,
+            )
+            self.input_scale.value = input_scale
+            self.input_amax_history.value = input_history
+            self.kernel_scale.value = kernel_scale
+            self.kernel_amax_history.value = kernel_history
+        return outputs
 
 
 class ResidentFp8Dense(nn.Module):
@@ -104,7 +134,7 @@ class BronetBlock(nn.Module):
             self.hidden_dims,
             kernel_init=default_init(),
             dot_general_cls=functools.partial(
-                nn.Fp8DirectDotGeneralOp,
+                Fp8DirectDotGeneralOp,
                 amax_history_length=self.fp8_amax_history_length,
             ),
         )
