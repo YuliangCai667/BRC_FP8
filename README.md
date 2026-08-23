@@ -78,6 +78,29 @@ FP8-target checkpoints support same-mode recovery only. Converting an existing
 FP32 target checkpoint to either direct or resident FP8 is intentionally
 unsupported in these mechanism tests.
 
+### Offline target-state simulation
+
+The offline simulator replays a complete healthy recovery checkpoint without
+creating an environment. One teacher follows the original BRC learner update,
+while lag-coded, naive per-tensor, naive block-scale, and lattice-matched
+interleaved block targets consume the same online-Critic trajectory without
+feeding back into it:
+
+```bash
+python scripts/simulate_fp8_target_updates.py \
+  --checkpoint=runs/offline_inputs/dogs_target_fwd_s42_step100000 \
+  --num_updates=50000 \
+  --block_size=128 \
+  --diagnostic_interval=500 \
+  --output_root=runs/offline_target_simulations \
+  --run_id=dogs_s42_step100k_lag_interleaved
+```
+
+Batch size, task order, seed, network width, update ratio, and Critic precision
+come from the checkpoint manifest. The replay buffer and reward-normalizer
+statistics remain frozen. Results, the fixed 256-sample probe, and JSONL metrics
+are written below `runs/` and are not version controlled.
+
 For the paper-aligned MetaWorld configuration, run:
 
 ```bash
