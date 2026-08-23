@@ -20,8 +20,9 @@
 | 2026-08-23 | `dmc_dogs_rewardmean_paper_s42_20260823` / `ttb7gnbz` | 运行中 | DMC Dogs，稳定化论文对齐 BRC | 42 / GPU 3 | `codex/paper-alignment` @ `9295a2d` | 正式 500k；完成后自动接 Humanoids |
 | Dogs 完成后 | `dmc_humanoids_rewardmean_paper_s42_20260823` | 排队 | DMC Humanoids，稳定化论文对齐 BRC | 42 / GPU 3 | `codex/paper-alignment` @ `9295a2d` | 仅 Dogs 正常退出后启动 |
 | 2026-08-24 00:14 | `brc_cheetah_run_d_target_fp8_resident_s0_smoke_final` | 完成 | `EXP-FP8-TARGET-SMOKE-D`：审查后常驻 FP8 目标 Critic 最终短跑验收 | 0 / GPU 3（另有约 8 GiB 外部任务） | `codex/blackwell-fp8-direct` @ `9c81c7d` + 本轮未提交实现 | 200 步、203 updates；无 NaN/Inf；实际 EMA 吞更新率 `8.01e-5`–`1.18e-4`；验收通过 |
-| 2026-08-24 00:24 | `brc_dmc_dogs_c_target_fp8_resident_s42` / `trzg1mjw` | 运行中 | `EXP-FP8-TARGET-C-S42`：在线 FP32、目标残差 kernel 常驻 FP8 | 42 / GPU 3（与 D 及外部任务共享） | `codex/blackwell-fp8-direct` @ `f88b662`，clean | 正式 Dogs 500k；step 5k 首次更新有限、无 NaN/Inf；对照 A 最终 794.40 |
-| 2026-08-24 00:24 | `brc_dmc_dogs_d_target_fp8_resident_s42` / `fb02bf23` | 运行中 | `EXP-FP8-TARGET-D-S42`：在线 FP8 Direct、目标残差 kernel 常驻 FP8 | 42 / GPU 3（与 C 及外部任务共享） | `codex/blackwell-fp8-direct` @ `f88b662`，clean | 正式 Dogs 500k；step 5k 首次更新有限、无 NaN/Inf；对照 B 最终 816.37 |
+| 2026-08-24 00:24 | `brc_dmc_dogs_c_target_fp8_resident_s42` / `trzg1mjw` | 运行中 | `EXP-FP8-TARGET-C-S42`：在线 FP32、目标残差 kernel 常驻 FP8 | 42 / GPU 3 | `codex/blackwell-fp8-direct` @ `f88b662`，clean | 正式 Dogs 500k；step 5k 首次更新有限、无 NaN/Inf；对照 A 最终 794.40 |
+| 2026-08-24 00:24 | `brc_dmc_dogs_d_target_fp8_resident_s42` / `fb02bf23` | 主动停止 | `EXP-FP8-TARGET-D-S42`：在线 FP8 Direct、目标残差 kernel 常驻 FP8 | 42 / GPU 3 | `codex/blackwell-fp8-direct` @ `f88b662`，clean | 00:32:38 按用户要求迁移 GPU；停止于 env step 10,057 / update 10,115；无 checkpoint，不作为完整正式结果 |
+| 2026-08-24 00:33 | `brc_dmc_dogs_d_target_fp8_resident_s42_gpu1_r1` / `iwlomjbu` | 运行中 | `EXP-FP8-TARGET-D-S42-R1`：D 在 GPU1 从头重启 | 42 / GPU 1（与既有任务共享） | `codex/blackwell-fp8-direct` @ `1ff6625`，clean；训练代码同 `f88b662` | 正式 Dogs 500k；step 5k 首次更新有限、无 NaN/Inf；对照 B 最终 816.37 |
 
 ## 已完成：原始 BRC 三种子基线
 
@@ -284,12 +285,13 @@ tmux new-session -d -s brc_dmc_dogs_c_target_fp8_resident_s42 \
 
 ### `EXP-FP8-TARGET-D-S42` — 在线 FP8 Direct / 目标常驻 FP8
 
-- 状态：运行中；2026-08-24 00:24:55 Asia/Shanghai 启动，与 C 使用同一干净提交，在两个独立 tmux 中并行运行。
+- 状态：主动停止；2026-08-24 00:24:55 Asia/Shanghai 启动，2026-08-24 00:32:38 按用户要求将 D 迁移到 GPU1 而停止。
 - 目的：相对 B 仅把目标 Critic 的四个逻辑残差 Dense kernel 改为常驻 E4M3、FP8 前向和逐步 FP8 EMA；在线 Critic 继续使用现有 `fp8_direct`。
 - 实际运行：GPU 3；tmux、本地 run ID 与 W&B 名称均为 `brc_dmc_dogs_d_target_fp8_resident_s42`；[W&B `fb02bf23`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/fb02bf23)。
 - 协议：除精度开关外与 C 及既有 A/B 的正式 Dogs 协议逐项一致。
 - 比较：直接对照 B（在线 FP8 Direct/目标 FP32，最终 eval return `816.37`），并以 C/D 的目标 EMA、activation、forward-error 和 eval 曲线检查数值稳定性与学习效果。
 - 启动验证：metadata 为 clean `f88b662`，CUDA/`ptxas` 与 C 相同；配置解析为 `critic_precision=fp8_direct`、`target_critic_precision=fp8_resident` 和同一目标缩放/覆盖语义。`wandb_initialization_finished`、`initialization_finished` 与 step 5,000 的 `first_update_finished` 均成功；首次 critic loss `22.041`、critic grad norm `18.795`、actor loss `26.839`、actor grad norm `22.499`，`update_nan_count=0`、`update_inf_count=0`。
+- 停止边界：`env_step=10057`、`global_transition=40228`、`update_step=10115`；事件流完整写入 `run_interrupted`（`KeyboardInterrupt`）和 `run_finished`。首个 checkpoint 门槛为 50k，因此没有可续跑 checkpoint；该短段保留为中断记录，不与新的 R1 拼接，也不作为完整正式结果。
 
 ```bash
 tmux new-session -d -s brc_dmc_dogs_d_target_fp8_resident_s42 \
@@ -337,7 +339,42 @@ tmux new-session -d -s brc_dmc_dogs_d_target_fp8_resident_s42 \
   "'
 ```
 
-启动门已满足：两个 tmux、两个训练进程、GPU3 占用、两个 run 目录、初始化事件、解析后的精度配置和实际 W&B ID 均已核对。验证时 GPU3 总占用约 `75.8 GiB`，其中另有一个非本项目进程占约 `58.0 GiB`；C/D 仍有足够显存并完成首次更新，但这种三进程共享进一步污染 wall clock、功耗与吞吐。因此本轮不据此作性能结论；学习效果和数值稳定性只按各自 eval 与低频 tensor-stat 分析，并始终披露共享 GPU 混杂。
+### `EXP-FP8-TARGET-D-S42-R1` — D 在 GPU1 从头重启
+
+- 状态：运行中；2026-08-24 00:33:14 Asia/Shanghai 启动。由于旧 D 尚未达到首个 checkpoint，R1 使用相同 seed 和协议从 step 0 重新开始，不续接、覆盖或拼接旧 run。
+- 实际运行：GPU 1；tmux、本地 run ID 与 W&B 名称均为 `brc_dmc_dogs_d_target_fp8_resident_s42_gpu1_r1`；[W&B `iwlomjbu`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/iwlomjbu)。GPU1 同时有一个既有 BRC 训练进程，因此本轮仍不读取 wall clock、功耗或吞吐作为性能证据。
+- 版本：metadata 为 clean `1ff6625`；该提交相对正式实现 `f88b662` 只增加科研文档，训练代码不变。配置解析为 `critic_precision=fp8_direct`、`target_critic_precision=fp8_resident`、seed 42、width 4096、batch 1024 和每步 2 次更新。
+- 启动验证：两个初始化事件和 step 5,000 的 `first_update_finished` 均已写入；首次 critic loss `24.505`、critic grad norm `20.890`、actor loss `26.848`、actor grad norm `22.670`，`update_nan_count=0`、`update_inf_count=0`。GPU 进程映射、tmux、run 目录和 W&B ID 均已核对；C 始终保留在 GPU3 且未重启。
+
+```bash
+tmux new-session -d -s brc_dmc_dogs_d_target_fp8_resident_s42_gpu1_r1 \
+  'env -u LD_LIBRARY_PATH bash -c "
+    cd /home/caiyuliang/BRC_FP8_blackwell_fp8 &&
+    export CUDA_ROOT=/usr/local/cuda-12.8 &&
+    export CUDA_HOME=/usr/local/cuda-12.8 &&
+    export PATH=/usr/local/cuda-12.8/bin:\$PATH &&
+    export CUDA_VISIBLE_DEVICES=1 &&
+    export XLA_PYTHON_CLIENT_PREALLOCATE=false &&
+    exec /home/caiyuliang/anaconda3/envs/brc/bin/python train.py \
+      --env_names=DMC_DOGS --seed=42 --eval_seed_offset=0 \
+      --max_steps=500000 --start_training=5000 \
+      --replay_buffer_size=1000000 --batch_size=1024 --updates_per_step=2 \
+      --width_critic=4096 --critic_precision=fp8_direct \
+      --target_critic_precision=fp8_resident --fp8_amax_history_length=1024 \
+      --paper_alignment=true --return_bootstrap=reward_mean \
+      --eval_interval=25000 --eval_episodes=10 --offline_evaluation=true \
+      --render=false --log_to_wandb=true \
+      --wandb_name=brc_dmc_dogs_d_target_fp8_resident_s42_gpu1_r1 \
+      --run_root=runs --run_id=brc_dmc_dogs_d_target_fp8_resident_s42_gpu1_r1 \
+      --metrics_interval=1000 --metrics_flush_interval=1000 \
+      --system_metrics_interval_sec=10 --profile_interval=25000 --profile_window=10 \
+      --tensor_stats_interval=25000 --analysis_checkpoint_interval=50000 \
+      --recovery_checkpoint_interval=100000 --keep_last_analysis_checkpoints=2 \
+      --keep_last_recovery_checkpoints=1 --save_replay_buffer=true
+  "'
+```
+
+当前启动门已满足：C 的 tmux/训练进程仍绑定 GPU3，D-R1 的 tmux/训练进程绑定 GPU1；两个 run 均已完成首次更新，精度配置和 W&B ID 均已核对。由于 GPU1 上还有既有任务，且两组运行环境不同，本轮继续只分析数值稳定性和学习效果，不据此比较 wall clock、功耗或吞吐。
 
 ## 更新规则
 

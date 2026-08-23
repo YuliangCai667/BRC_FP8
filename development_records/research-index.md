@@ -10,9 +10,9 @@
 
 | 类型 | 文档 | 作用 | 最近实质更新 |
 |---|---|---|---|
-| Idea | [fp8-research-ideas.md](fp8-research-ideas.md) | 假设、机制、实验门槛和论文叙事 | 2026-08-23 |
+| Idea | [fp8-research-ideas.md](fp8-research-ideas.md) | 假设、机制、实验门槛和论文叙事 | 2026-08-24 |
 | 性能技巧 | [fp8-performance-optimization-backlog.md](fp8-performance-optimization-backlog.md) | 待测性能优化，不等同于采用方案 | 2026-08-23 |
-| 实验台账 | [experiment-runs.md](experiment-runs.md) | 命令、运行状态、结果和混杂因素 | 2026-08-23 |
+| 实验台账 | [experiment-runs.md](experiment-runs.md) | 命令、运行状态、结果和混杂因素 | 2026-08-24 |
 | 在线 FP8 改动 | [2026-08-23-blackwell-fp8-direct.md](2026-08-23-blackwell-fp8-direct.md) | 当前 A/B 计算路径及验证证据 | 2026-08-23 |
 | 常驻目标 FP8 改动 | [2026-08-23-persistent-fp8-target-critic.md](2026-08-23-persistent-fp8-target-critic.md) | 本轮实现、验证与限制 | 2026-08-24 |
 
@@ -26,6 +26,7 @@
 ## 当前实验与决策门
 
 - `EXP-FP8-TARGET-SMOKE-D`：审查后 GPU3 最终短跑已通过；203 updates 无 NaN/Inf，step 150 最后一次真实 EMA 写回在八个目标矩阵上的吞更新率为 `8.01e-5`–`1.18e-4`，applied/intended L2 ratio 为 `0.999999`–`1.000005`。这只是 width-512 单点机制证据。
-- `EXP-FP8-TARGET-C-S42`：运行中；在线 FP32、目标残差核心常驻 FP8，W&B `trzg1mjw`。
-- `EXP-FP8-TARGET-D-S42`：运行中；在线 FP8 Direct、目标残差核心常驻 FP8，W&B `fb02bf23`。
+- `EXP-FP8-TARGET-C-S42`：运行中；在线 FP32、目标残差核心常驻 FP8，GPU3，W&B `trzg1mjw`。
+- `EXP-FP8-TARGET-D-S42`：GPU3 旧段按迁移要求主动停止于 env step 10,057 / update 10,115；W&B `fb02bf23`，无 checkpoint，不作为完整正式结果。
+- `EXP-FP8-TARGET-D-S42-R1`：运行中；在线 FP8 Direct、目标残差核心常驻 FP8，在 GPU1 从头重启，W&B `iwlomjbu`；step 5,000 首次更新有限且无 NaN/Inf。
 - 下一决策门：只在 C/D 证明存在明显吞更新或训练不稳定后，选择更新频率匹配、Kahan、随机舍入或其他修正；当前不预埋任何修正。
