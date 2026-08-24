@@ -24,7 +24,10 @@
 | 2026-08-24 00:24 | `brc_dmc_dogs_d_target_fp8_resident_s42` / `fb02bf23` | 主动停止 | `EXP-FP8-TARGET-D-S42`：在线 FP8 Direct、目标残差 kernel 常驻 FP8 | 42 / GPU 3 | `codex/blackwell-fp8-direct` @ `f88b662`，clean | 00:32:38 按用户要求迁移 GPU；停止于 env step 10,057 / update 10,115；无 checkpoint，不作为完整正式结果 |
 | 2026-08-24 00:33 | `brc_dmc_dogs_d_target_fp8_resident_s42_gpu1_r1` / `iwlomjbu` | 主动停止 | `EXP-FP8-TARGET-D-S42-R1`：D 在 GPU1 从头重启 | 42 / GPU 1（与既有任务共享） | `codex/blackwell-fp8-direct` @ `1ff6625`，clean；训练代码同 `f88b662` | 停止于 env step 137438 / update 264877；125k eval `7.23`，朴素常驻 FP8 判定失败 |
 | 2026-08-24 01:16 | `brc_cheetah_run_target_fp8_direct_fp32_storage_s0_smoke` | 完成 | `EXP-FP8-TARGET-FWD-SMOKE`：目标 FP8 Direct 前向、FP32 存储短跑 | 0 / GPU 2（与既有任务共享） | `1eecc56` + 本轮未提交实现 | 200 steps / 203 updates；无 NaN/Inf；298 条 tensor stats；验收通过 |
-| 2026-08-24 01:24 | `brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2` / `gij6jhgd` | 运行中 | `EXP-FP8-TARGET-FWD-S42`：在线/目标 FP8 Direct，目标 FP32 存储与 EMA | 42 / GPU 2（与既有 MetaWorld 任务共享） | `codex/blackwell-fp8-direct` @ `186d153`，clean | 正式 Dogs 500k；step 5k 首次更新有限、无 NaN/Inf；比较 B 与 D-R1 |
+| 2026-08-24 01:24 | `brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2` / `gij6jhgd` | 完成 | `EXP-FP8-TARGET-FWD-S42`：在线/目标 FP8 Direct，目标 FP32 存储与 EMA | 42 / GPU 2（与既有 MetaWorld 任务共享） | `codex/blackwell-fp8-direct` @ `186d153`，clean | 500k 完成；最终 return `757.81`，无数值失败；与 B 的 `816.37` 同量级，明显优于常驻 target 的 `7.23` |
+| 2026-08-24 | `dogs_s42_step100k_lag_interleaved` | 完成 | `EXP-FP8-TARGET-OFFLINE-50K`：共享健康 teacher 的四路目标状态筛选 | 42 / GPU 3 | `codex/blackwell-fp8-direct` @ `50814df`，clean | 50k updates / 100 诊断点；lag target relative error `0.00667`，其余三路 `0.346`–`0.352` |
+| 2026-08-24 | `dogs_s42_step100k_kahan_smoke100` | 完成 | `EXP-FP8-TARGET-KAHAN-SMOKE`：Kahan 双 E4M3 buffer 的 checkpoint 验收 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `50814df` + Kahan 未提交实现 | 100 updates / 2 诊断点；所有状态与指标有限，无 NaN/Inf |
+| 2026-08-24 | `dogs_s42_step100k_kahan_lag_30k` | 完成 | `EXP-FP8-TARGET-KAHAN-OFFLINE-30K`：FP8 Kahan-momentum 与 lag-coded 同轨迹比较 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `50814df` + Kahan 未提交实现 | 30k / 60 点，无 NaN/Inf；Kahan state error `0.25858`，lag `0.00773` |
 
 ## 已完成：原始 BRC 三种子基线
 
@@ -393,12 +396,13 @@ env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 CUDA_HOME=/usr/local/cuda-
 
 ### `EXP-FP8-TARGET-FWD-S42` — 目标 FP8 计算 / FP32 存储正式对照
 
-- 状态：运行中；2026-08-24 01:24:39 Asia/Shanghai 在 GPU2 的独立 tmux 中启动。
+- 状态：完成；2026-08-24 01:24:39 Asia/Shanghai 在 GPU2 的独立 tmux 中启动，正常训练至 env step 500k / learner update 990003 并写入 `run_finished`。
 - 目的：在线 Critic 保持现有 FP8 Direct；目标 Critic 的四个残差 Dense 同样采用 FP8 Direct，但全部目标参数与逐步 EMA 保持 FP32。相对 B 只增加目标 FP8 前向；相对 D-R1 只移除常驻 E4M3 存储与 requantized EMA。
 - 协议：逐项复用 A/B/C/D 的 Dogs seed-42 正式协议：500k steps、start 5k、replay 1M、batch 1024、2 updates/step、width 4096、paper alignment、reward-mean bootstrap、25k eval/tensor stats、50k analysis checkpoint、100k recovery checkpoint。
 - 运行：GPU2，与既有 MetaWorld seed-123 训练共享；tmux、run ID 与 W&B name 均为 `brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2`；[W&B `gij6jhgd`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/gij6jhgd)。因此只比较数值稳定性和学习/eval，不比较 wall clock、功耗或吞吐。
 - 决策门：没有预设 return 阈值；完成后先核对协议和有限值，再以 B → 本组判断目标 bootstrap 计算误差，以本组 → D-R1 判断持久 FP8 存储/EMA 的增量影响。
 - 启动验证：metadata 为 clean `186d153`；CUDA root/home 与 `ptxas 12.8.61` 均来自 `/usr/local/cuda-12.8`。配置解析为 online/target `fp8_direct`、四个目标残差 Dense FP8 compute、全部目标参数 FP32、delayed per-tensor scaling、仅 bootstrap 前向推进 input/kernel scale state。tmux、PID `71842`、物理 GPU2 绑定、run 目录、W&B ID 和两个初始化事件均已核对。step 5,000 的首次更新完成：critic loss `23.059`、critic grad norm `19.649`、actor loss `26.913`、actor grad norm `22.356`，`update_nan_count=0`、`update_inf_count=0`。
+- 最终结果：四任务 return 为 `960.56 / 912.40 / 791.48 / 366.79`，均值 `757.81`。单 seed 下相对在线 FP8、目标 FP32 baseline `816.37` 有一定下降，但仍处于同一学习量级；与 naive resident D-R1 在 125k 的 `7.23` 形成数量级差距，支持将主要失败归因于常驻 E4M3 target 状态与逐步 requantized EMA，而不是目标 FP8 前向本身。
 
 ```bash
 tmux new-session -d -s brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2 \
@@ -432,18 +436,19 @@ tmux new-session -d -s brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2 \
 
 ### `EXP-FP8-TARGET-OFFLINE-SMOKE` — 100-update GPU 验收
 
-- 状态：预登记，尚未启动。
+- 状态：完成；100 learner updates，全部方法状态和诊断有限，teacher 与无 shadow 的独立更新逐叶一致。
 - 输入：`EXP-FP8-TARGET-FWD-S42` 的 100k 完整 recovery；已用硬链接固定为 `runs/offline_inputs/dogs_target_fwd_s42_step100000`，源 checkpoint 的 eval return 为 `340.61`。
 - 目的：验证健康 teacher、lag-coded、naive per-tensor、naive block-scale 与 interleaved block 在 width 4096 下可共同编译，所有状态和功能指标有限，且 teacher 不受 shadow 影响。
 - 协议：100 learner updates，checkpoint 原始 batch 1024、2 updates/group、seed/task order/normalizer/replay/RNG 全部恢复；block `128x128`；每 50 updates 诊断。无环境、W&B、return eval 或性能结论。
 
 ### `EXP-FP8-TARGET-OFFLINE-50K` — 双方法主筛选
 
-- 状态：预登记，等待 smoke 与干净代码提交。
+- 状态：完成；输出 `runs/offline_target_simulations/dogs_s42_step100k_lag_interleaved`，50,000 updates、100 个诊断点、teacher/shadow 无 NaN/Inf。
 - 输入与 teacher：与 smoke 完全相同；冻结 replay 与 normalizer 统计，25,000 次两-batch 采样组顺序产生 50,000 learner updates。teacher 完整更新 Actor、online Critic、FP32 target 与 temperature；四个 shadow 逐步读取同一 `online_old/online_new`，不反向影响 teacher。
 - 方法：主方法为 per-tensor E4M3 lag-coded target 与 `128x128` 动态 block-scale 的确定性交错 EMA；控制为 naive per-tensor resident 与 naive per-step block scale。不实现 Kahan、随机舍入或 sub-ULP 状态。
 - 诊断：每 500 updates，共 100 点；记录累计参数方向/范数、target drift、codes/block 事件、动态 scale、FP32 reference expected-Q/101-bin JS、完整 categorical Bellman target 误差，以及 teacher FP8 Direct 计算噪声底。
 - 判断：interleaved 只与 naive block 比较时间调度增量；lag 必须接近 FP32 teacher，而非仅优于已知失败的 naive per-tensor。无预设成功阈值，且本轮不自动启动闭环训练。
+- 结果：lag-coded 终点 target relative error `0.006665`、displacement ratio `1.000354`、cosine `0.999808`、expected-Q MAE `0.001160`。naive per-tensor、naive block 和 interleaved 的 relative error 分别为 `0.345703/0.352283/0.346894`；interleaved 相对 naive block 的改善很小，首版时间调度方案不继续推进。
 
 ```bash
 env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 CUDA_HOME=/usr/local/cuda-12.8 PATH=/usr/local/cuda-12.8/bin:$PATH XLA_PYTHON_CLIENT_PREALLOCATE=false \
@@ -452,6 +457,27 @@ env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 CUDA_HOME=/usr/local/cuda-
   --num_updates=50000 --block_size=128 --diagnostic_interval=500 \
   --output_root=runs/offline_target_simulations \
   --run_id=dogs_s42_step100k_lag_interleaved
+```
+
+### `EXP-FP8-TARGET-KAHAN-OFFLINE-30K` — FP16 SAC Kahan-momentum 的 FP8 基线
+
+- 状态：完成。2026-08-24 15:11:15–15:33:12 Asia/Shanghai，GPU1，tmux `brc_fp8_target_kahan_offline_30k_gpu1`；teacher step `190003→220003`，30,000 updates、60 个诊断点，完成事件和完整输出均存在，teacher/shadow NaN/Inf 为 `0/0`。先行 100-update smoke 也完成且有限。
+- 输入与 teacher：复用固定的 `dogs_target_fwd_s42_step100000` recovery，恢复相同 replay、normalizer、模型和 RNG；30,000 learner updates，不进行环境交互。
+- 方法：在相同四个残差 kernel 上增加 scaled Kahan-momentum shadow。按论文使用 `C=1e4`，`C*target` 与 compensation 分别持久存为 E4M3 + ensemble 独立 current-amax per-tensor scale；不保留 FP32 target master。
+- 比较：主要比较 `kahan_momentum ↔ lag_coded`，并保留原 naive/block shadows。由于 Kahan 需要两张 FP8 矩阵而 lag 只需一张，除误差外也报告状态开销差异。
+- 诊断：每 500 updates，共 60 点；与 50K screen 使用完全相同的参数位移、expected-Q、101-bin JS、Bellman target 和非有限值指标。
+- 限制：动态 scale 会使 `C` 的纯放大作用在数学上抵消；本实验检验的是 Kahan compensation 能否在 FP8 状态下恢复更新，而不是把 `C=1e4` 当作新的可调收益来源。
+- 结果：30k 终点 lag/Kahan 的 target relative error 为 `0.007725/0.258575`，displacement L2 ratio 为 `1.000292/0.207277`，cosine 为 `0.999540/0.030080`；expected-Q MAE 为 `0.001216/0.141415`，Bellman expected-Q MAE 为 `0.001204/0.140001`，probability JS 为 `3.26e-6/0.012536`。
+- 归因：Kahan 与 naive per-tensor 在全部 60 点几乎重合；两者 target relative error 的最大绝对差仅 `6.26e-7`，expected-Q MAE 最大差 `2.30e-6`。compensation 并非未更新：终点八张物理矩阵的 compensation amax 为 `0.00124–0.00144`，但它没有改变可见 E4M3 target 轨迹。Kahan 还需要两份 E4M3 matrix state，lag 只需一份。
+- 可比性：本次 run 内五个 shadow 严格共享同一 teacher，因此 Kahan↔lag 归因有效。它与早先 50k run 虽从同一 checkpoint/协议恢复，但 GPU replay 并非 bitwise 相同；不把跨 run 的逐点差异解释为方法差异。
+
+```bash
+env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 CUDA_HOME=/usr/local/cuda-12.8 PATH=/usr/local/cuda-12.8/bin:$PATH XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  /home/caiyuliang/anaconda3/envs/brc/bin/python scripts/simulate_fp8_target_updates.py \
+  --checkpoint=runs/offline_inputs/dogs_target_fwd_s42_step100000 \
+  --num_updates=30000 --block_size=128 --diagnostic_interval=500 \
+  --output_root=runs/offline_target_simulations \
+  --run_id=dogs_s42_step100k_kahan_lag_30k
 ```
 
 ## 更新规则

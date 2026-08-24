@@ -25,7 +25,7 @@ Updated: 2026-08-24. The accepted first test stores only the four logical residu
 
 Formal width-4,096 Dogs seed-42 C/D runs started from clean commit `f88b662` on 2026-08-24. They were deliberately stopped on 2026-08-24 after the failure was decisive: C ended at env step 150k / update 290003 with its last complete 125k eval return `8.16`; D-R1 ended at env step 137438 / update 264877 with 125k eval `7.23`. Their matched A/B controls were already at `427.68/411.66` by 125k. Both resident runs remained finite with no NaN/Inf, so the failure is learning stagnation rather than arithmetic explosion. The original short D segment (`fb02bf23`) remains a separate migration-interrupted run.
 
-The target-forward-only arm is now implemented and GPU-smoke validated: online and target residual GEMMs use `fp8_direct`, but all target parameters and EMA arithmetic remain FP32. This is a control rather than a proposed low-precision state method. B → target-forward-only isolates target bootstrap compute error; target-forward-only → D-R1 isolates persistent E4M3 target storage plus per-step requantized EMA. The formal Dogs seed-42 run `EXP-FP8-TARGET-FWD-S42` is running on GPU2 as W&B `gij6jhgd`; it passed its first update without NaN/Inf. GPU2 is shared, so it will not support performance claims.
+The target-forward-only arm is complete: online and target residual GEMMs use `fp8_direct`, but all target parameters and EMA arithmetic remain FP32. This is a control rather than a proposed low-precision state method. B → target-forward-only isolates target bootstrap compute error; target-forward-only → D-R1 isolates persistent E4M3 target storage plus per-step requantized EMA. The formal Dogs seed-42 run `EXP-FP8-TARGET-FWD-S42` (W&B `gij6jhgd`) completed 500k steps with final mean return `757.81`, versus `816.37` for B and `7.23` at 125k for D-R1. This single-seed result does not establish equivalence to B, but it rules out target FP8 forward alone as an explanation for the resident target's learning stagnation. GPU2 was shared, so the run does not support performance claims.
 
 Working names:
 
@@ -177,6 +177,51 @@ Replace a general floating residual by an 8-bit per-weight phase measured in fra
 
 This is a deterministic way to retain sub-ULP updates with approximately 8 extra bits per stored target weight rather than a 32-bit master. It is still conceptually related to compensated/error-feedback arithmetic, and exponent-boundary plus scale-change behavior must be defined carefully. It is attractive as a robust engineering branch even if it is not the main novelty claim.
 
+### Candidate B3: scaled Kahan-momentum baseline
+
+Status: `baseline-only`; the 30k open-loop screen is complete and rejects this
+FP8 adaptation as an effective replacement for lag-coded state.
+
+Follow the FP16 SAC paper's Kahan-momentum ordering and its state scale
+`C=1e4`. For each residual kernel, persist an E4M3 representation of
+`C * target` and a second E4M3 Kahan compensation tensor; the two buffers have
+independent current-amax per-tensor scales for each ensemble member. One update
+is:
+
+```text
+value = C * tau * (online - target)
+y = value - compensation
+new_scaled_target = Q_E4M3(scaled_target + y)
+compensation = Q_E4M3((dequant(new_scaled_target) - scaled_target) - y)
+target = dequant(new_scaled_target) / C
+```
+
+There is no FP32 target master. This preserves the paper's scaled-buffer and
+compensated-addition semantics while avoiding immediate overflow from storing a
+literal `1e4`-scaled tensor without an FP8 scale. Because current-amax scaling
+is homogeneous, multiplying by `C` does not by itself create extra E4M3
+mantissa resolution; any gain must come from the compensation buffer. That is a
+material difference from fixed-range FP16 and must be stated when interpreting
+the baseline.
+
+The first screen replays 30,000 learner updates from the same fixed healthy
+Dogs checkpoint and reports the same parameter, expected-Q, categorical-target,
+and non-finite diagnostics as lag-coded. A useful result for the paper is not
+merely “Kahan is worse”: lag-coded should remain closer to the FP32 teacher
+while using one FP8 matrix state per kernel, whereas Kahan uses two.
+
+Observed result, `EXP-FP8-TARGET-KAHAN-OFFLINE-30K`: all 30,000 updates and 60
+diagnostic points were finite. At the endpoint, lag-coded versus Kahan target
+relative error was `0.007725/0.258575`, displacement cosine
+`0.999540/0.030080`, expected-Q MAE `0.001216/0.141415`, and categorical
+probability JS `3.26e-6/0.012536`. Kahan was effectively indistinguishable
+from naive per-tensor resident EMA across the entire window (maximum target
+relative-error difference `6.26e-7`). The compensation was nonzero, so this is
+not a dead-state implementation failure. Under dynamic FP8 scaling, the
+paper's scaled Kahan buffer does not repair the absolute target lattice; keep
+it as the strongest directly relevant prior-art baseline rather than a method
+branch.
+
 ### Candidate C: stochastic FP8 EMA rounding
 
 Disposition: `baseline-only`, deferred until a proposed method exists.
@@ -201,7 +246,8 @@ Decision note, 2026-08-24: do not modify the bootstrap rule in the first interve
 
 ### Candidate F: lag-coded target state
 
-Status: `testing` through the same open-loop teacher simulation.
+Status: `supported` by the 50k and Kahan-controlled 30k open-loop screens;
+closed-loop training remains pending.
 
 Do not store the target as an absolute copy of a relatively large weight. Store its lag relative to the online Critic:
 

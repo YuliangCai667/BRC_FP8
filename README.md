@@ -82,9 +82,11 @@ unsupported in these mechanism tests.
 
 The offline simulator replays a complete healthy recovery checkpoint without
 creating an environment. One teacher follows the original BRC learner update,
-while lag-coded, naive per-tensor, naive block-scale, and lattice-matched
-interleaved block targets consume the same online-Critic trajectory without
-feeding back into it:
+while lag-coded, scaled Kahan-momentum, naive per-tensor, naive block-scale, and
+lattice-matched interleaved block targets consume the same online-Critic
+trajectory without feeding back into it. The Kahan baseline follows the FP16
+SAC formulation with a `C=1e4` scaled target buffer, but stores both that
+buffer and its compensation in E4M3 with independent current-amax scales:
 
 ```bash
 python scripts/simulate_fp8_target_updates.py \

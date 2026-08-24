@@ -14,6 +14,13 @@ from jaxrl.agent.update import _is_resident_kernel, build_actor_input
 from jaxrl.networks import E4M3_MAX
 
 
+KAHAN_MOMENTUM_SCALE = 1e4
+SHADOW_METHODS = (
+    'lag_coded', 'kahan_momentum', 'naive_per_tensor',
+    'naive_block_scale', 'interleaved_block',
+)
+
+
 def _flatten(tree):
     return traverse_util.flatten_dict(tree)
 
@@ -74,6 +81,8 @@ def lag_recurrence_exact(lag, online_old, online_new, tau: float):
 class QuantizedMethodState:
     codes: flax.core.FrozenDict
     scales: flax.core.FrozenDict
+    compensation_codes: flax.core.FrozenDict | None = None
+    compensation_scales: flax.core.FrozenDict | None = None
     phases: flax.core.FrozenDict | None = None
     code_changes: flax.core.FrozenDict | None = None
     opportunities: flax.core.FrozenDict | None = None
@@ -84,6 +93,7 @@ class QuantizedMethodState:
 @flax.struct.dataclass
 class TargetShadowStates:
     lag_coded: QuantizedMethodState
+    kahan_momentum: QuantizedMethodState
     naive_per_tensor: QuantizedMethodState
     naive_block_scale: QuantizedMethodState
     interleaved_block: QuantizedMethodState
@@ -124,11 +134,19 @@ def initialize_shadow_states(online_params, target_params, block_size: int):
     online = _flatten(online_params)
     target = _flatten(target_params)
     lag_codes, lag_scales = {}, {}
+    kahan_codes, kahan_scales = {}, {}
+    compensation_codes, compensation_scales = {}, {}
     tensor_codes, tensor_scales = {}, {}
     block_codes, block_scales = {}, {}
     for path in paths:
         lag_codes[path], lag_scales[path] = _quantize_ensemble(
             target[path] - online[path]
+        )
+        kahan_codes[path], kahan_scales[path] = _quantize_ensemble(
+            KAHAN_MOMENTUM_SCALE * target[path]
+        )
+        compensation_codes[path], compensation_scales[path] = (
+            _quantize_ensemble(jnp.zeros_like(target[path]))
         )
         tensor_codes[path], tensor_scales[path] = _quantize_ensemble(target[path])
         block_codes[path], block_scales[path] = quantize_e4m3_blocks(
@@ -140,6 +158,11 @@ def initialize_shadow_states(online_params, target_params, block_size: int):
     return TargetShadowStates(
         lag_coded=QuantizedMethodState(
             codes=_unflatten(lag_codes), scales=_unflatten(lag_scales), **common
+        ),
+        kahan_momentum=QuantizedMethodState(
+            codes=_unflatten(kahan_codes), scales=_unflatten(kahan_scales),
+            compensation_codes=_unflatten(compensation_codes),
+            compensation_scales=_unflatten(compensation_scales), **common,
         ),
         naive_per_tensor=QuantizedMethodState(
             codes=_unflatten(tensor_codes), scales=_unflatten(tensor_scales), **common
@@ -220,6 +243,53 @@ def update_naive_per_tensor(state, online_new, tau: float):
         )
     return _update_counts(
         state.replace(codes=_unflatten(codes), scales=_unflatten(scales)),
+        changes, opportunities,
+    )
+
+
+def update_kahan_momentum(
+    state, online_new, tau: float,
+    momentum_scale: float = KAHAN_MOMENTUM_SCALE,
+):
+    """Paper-faithful scaled Kahan EMA with E4M3 persistent buffers."""
+    online = _flatten(online_new)
+    old_codes, old_scales = _flatten(state.codes), _flatten(state.scales)
+    old_compensation_codes = _flatten(state.compensation_codes)
+    old_compensation_scales = _flatten(state.compensation_scales)
+    codes, scales = {}, {}
+    compensation_codes, compensation_scales = {}, {}
+    changes, opportunities = {}, {}
+    for path in old_codes:
+        scaled_target = _dequantize_ensemble(
+            old_codes[path], old_scales[path]
+        )
+        target = scaled_target / momentum_scale
+        compensation = _dequantize_ensemble(
+            old_compensation_codes[path], old_compensation_scales[path]
+        )
+        value = momentum_scale * tau * (online[path] - target)
+        corrected_value = value - compensation
+        candidate = scaled_target + corrected_value
+        codes[path], scales[path] = _quantize_ensemble(candidate)
+        applied_sum = _dequantize_ensemble(codes[path], scales[path])
+        compensation_candidate = (
+            applied_sum - scaled_target
+        ) - corrected_value
+        (
+            compensation_codes[path], compensation_scales[path]
+        ) = _quantize_ensemble(compensation_candidate)
+        changes[path] = jnp.sum(
+            codes[path] != old_codes[path], axis=(-2, -1), dtype=jnp.float32
+        )
+        opportunities[path] = jnp.full_like(
+            changes[path], old_codes[path].shape[-2] * old_codes[path].shape[-1]
+        )
+    return _update_counts(
+        state.replace(
+            codes=_unflatten(codes), scales=_unflatten(scales),
+            compensation_codes=_unflatten(compensation_codes),
+            compensation_scales=_unflatten(compensation_scales),
+        ),
         changes, opportunities,
     )
 
@@ -357,6 +427,9 @@ def update_shadow_states(states, online_old, online_new, tau, block_size):
         lag_coded=update_lag_coded(
             states.lag_coded, online_old, online_new, tau
         ),
+        kahan_momentum=update_kahan_momentum(
+            states.kahan_momentum, online_new, tau
+        ),
         naive_per_tensor=update_naive_per_tensor(
             states.naive_per_tensor, online_new, tau
         ),
@@ -379,6 +452,11 @@ def reconstruct_shadow_params(method, state, online_params, teacher_target_param
             result[path] = online[path] + _dequantize_ensemble(
                 codes[path], scales[path]
             )
+        elif method == 'kahan_momentum':
+            result[path] = (
+                _dequantize_ensemble(codes[path], scales[path])
+                / KAHAN_MOMENTUM_SCALE
+            )
         elif method == 'naive_per_tensor':
             result[path] = _dequantize_ensemble(codes[path], scales[path])
         else:
@@ -394,10 +472,7 @@ def all_shadow_params(states, online_params, teacher_target_params, block_size):
             name, getattr(states, name), online_params, teacher_target_params,
             block_size,
         )
-        for name in (
-            'lag_coded', 'naive_per_tensor', 'naive_block_scale',
-            'interleaved_block',
-        )
+        for name in SHADOW_METHODS
     }
 
 
@@ -502,6 +577,14 @@ def parameter_diagnostics(
             _flatten(method_state.phases)
             if method_state.phases is not None else {}
         )
+        method_compensation = (
+            _flatten(method_state.compensation_codes)
+            if method_state.compensation_codes is not None else {}
+        )
+        method_compensation_scales = (
+            _flatten(method_state.compensation_scales)
+            if method_state.compensation_scales is not None else {}
+        )
         method_result = {}
         aggregate = {
             'teacher_displacement_sq': jnp.float32(0.0),
@@ -532,6 +615,18 @@ def parameter_diagnostics(
                     storage.update(
                         lag_abs_mean=jnp.mean(jnp.abs(lag)),
                         lag_amax=jnp.max(jnp.abs(lag)),
+                    )
+                if method == 'kahan_momentum':
+                    compensation = _dequantize_ensemble(
+                        method_compensation[path],
+                        method_compensation_scales[path],
+                    )[member]
+                    compensation_scale = method_compensation_scales[path][member]
+                    storage.update(
+                        momentum_scale=jnp.float32(KAHAN_MOMENTUM_SCALE),
+                        compensation_abs_mean=jnp.mean(jnp.abs(compensation)),
+                        compensation_amax=jnp.max(jnp.abs(compensation)),
+                        compensation_scale=compensation_scale,
                     )
                 if path in method_phases:
                     phase = method_phases[path][member]

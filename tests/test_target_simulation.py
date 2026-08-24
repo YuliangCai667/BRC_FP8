@@ -14,6 +14,8 @@ from jaxrl.agent.update import (
     update_target_critic,
 )
 from jaxrl.target_simulation import (
+    KAHAN_MOMENTUM_SCALE,
+    _quantize_ensemble,
     candidate_alphas,
     dequantize_e4m3_blocks,
     initialize_shadow_states,
@@ -23,6 +25,7 @@ from jaxrl.target_simulation import (
     teacher_update_once,
     teacher_shadow_update,
     update_interleaved_block,
+    update_kahan_momentum,
     update_lag_coded,
     update_naive_block_scale,
     update_naive_per_tensor,
@@ -92,6 +95,70 @@ class TargetSimulationTest(unittest.TestCase):
             self.assertEqual(codes.shape, (2, 16, 16))
             self.assertEqual(flat_scales[path].shape, (2,))
             self.assertEqual(flat_scales[path].dtype, jnp.float32)
+
+    def test_kahan_state_scope_dtype_and_zero_compensation(self):
+        state = self.shadows.kahan_momentum
+        flat_codes = traverse_util.flatten_dict(state.codes)
+        flat_scales = traverse_util.flatten_dict(state.scales)
+        flat_compensation = traverse_util.flatten_dict(state.compensation_codes)
+        flat_compensation_scales = traverse_util.flatten_dict(
+            state.compensation_scales
+        )
+        self.assertEqual(len(flat_codes), 4)
+        for path, codes in flat_codes.items():
+            self.assertEqual(codes.dtype, jnp.float8_e4m3fn)
+            self.assertEqual(codes.shape, (2, 16, 16))
+            self.assertEqual(flat_scales[path].shape, (2,))
+            self.assertEqual(flat_compensation[path].dtype, jnp.float8_e4m3fn)
+            self.assertEqual(flat_compensation_scales[path].shape, (2,))
+            np.testing.assert_array_equal(
+                np.asarray(flat_compensation[path]), 0
+            )
+
+    def test_kahan_update_matches_quantized_recurrence(self):
+        state = self.shadows.kahan_momentum
+        moved = jax.tree.map(lambda value: value + 0.01, self.agent.critic.params)
+        updated = update_kahan_momentum(state, moved, 0.005)
+        old_codes = traverse_util.flatten_dict(state.codes)
+        old_scales = traverse_util.flatten_dict(state.scales)
+        new_codes = traverse_util.flatten_dict(updated.codes)
+        new_scales = traverse_util.flatten_dict(updated.scales)
+        compensation_codes = traverse_util.flatten_dict(
+            updated.compensation_codes
+        )
+        compensation_scales = traverse_util.flatten_dict(
+            updated.compensation_scales
+        )
+        online = traverse_util.flatten_dict(moved)
+        for path in old_codes:
+            old_sum = (
+                old_codes[path].astype(jnp.float32)
+                * old_scales[path][:, None, None]
+            )
+            target = old_sum / KAHAN_MOMENTUM_SCALE
+            value = KAHAN_MOMENTUM_SCALE * 0.005 * (online[path] - target)
+            applied_sum = (
+                new_codes[path].astype(jnp.float32)
+                * new_scales[path][:, None, None]
+            )
+            expected_compensation = (applied_sum - old_sum) - value
+            expected_codes, expected_scales = _quantize_ensemble(
+                expected_compensation
+            )
+            np.testing.assert_array_equal(
+                np.asarray(compensation_codes[path]), np.asarray(expected_codes)
+            )
+            np.testing.assert_array_equal(
+                np.asarray(compensation_scales[path]), np.asarray(expected_scales)
+            )
+        params = reconstruct_shadow_params(
+            'kahan_momentum', updated, moved,
+            self.agent.target_critic.params, 8,
+        )
+        self.assertTrue(all(
+            np.isfinite(np.asarray(value)).all()
+            for value in jax.tree.leaves(params)
+        ))
 
     def test_block_quantizer_formula_and_shapes(self):
         values = jnp.arange(2 * 16 * 16, dtype=jnp.float32).reshape(2, 16, 16)

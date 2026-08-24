@@ -224,6 +224,10 @@ def main():
             'probe_size': int(probe.observations.shape[0]),
             'methods': {
                 'lag_coded': 'per-ensemble E4M3 lag with current-amax scale',
+                'kahan_momentum': (
+                    'scaled Kahan EMA (C=1e4) with E4M3 target and '
+                    'compensation buffers, each dynamically scaled per ensemble'
+                ),
                 'naive_per_tensor': 'per-step current-amax per-tensor E4M3 EMA',
                 'naive_block_scale': (
                     f'per-step dynamic {args.block_size}x{args.block_size} E4M3 EMA'
