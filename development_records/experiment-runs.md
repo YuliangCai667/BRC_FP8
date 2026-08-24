@@ -29,7 +29,7 @@
 | 2026-08-24 | `dogs_s42_step100k_kahan_smoke100` | 完成 | `EXP-FP8-TARGET-KAHAN-SMOKE`：Kahan 双 E4M3 buffer 的 checkpoint 验收 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `50814df` + Kahan 未提交实现 | 100 updates / 2 诊断点；所有状态与指标有限，无 NaN/Inf |
 | 2026-08-24 | `dogs_s42_step100k_kahan_lag_30k` | 完成 | `EXP-FP8-TARGET-KAHAN-OFFLINE-30K`：FP8 Kahan-momentum 与 lag-coded 同轨迹比较 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `50814df` + Kahan 未提交实现 | 30k / 60 点，无 NaN/Inf；Kahan state error `0.25858`，lag `0.00773` |
 | 2026-08-24 16:32 | `brc_cheetah_run_target_fp8_lag_s0_smoke` | 完成 | `EXP-FP8-TARGET-LAG-SMOKE`：lag-coded target 闭环短跑 | 0 / GPU 1 | `2091e7e` + lag 未提交实现 | 200 steps / 203 updates；NaN/Inf `0/0`；498 条 tensor stats；HLO 与数值验收通过 |
-| 待启动 | `brc_dmc_dogs_target_fp8_lag_s42` | 预登记 | `EXP-FP8-TARGET-LAG-S42`：在线 FP8 Direct、目标 lag 常驻 FP8 | 42 / 待选最空闲 GPU | 待 lag 干净提交 | Dogs 500k；只看闭环学习与稳定性，不设 return 自动停止阈值 |
+| 2026-08-24 16:47 | `brc_dmc_dogs_target_fp8_lag_s42` / `nu2d5b90` | 运行中 | `EXP-FP8-TARGET-LAG-S42`：在线 FP8 Direct、目标 lag 常驻 FP8 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `1c135af`，clean | Dogs 500k；step 5k 首更有限、NaN/Inf `0/0`；不设 return 自动停止阈值 |
 
 ## 已完成：原始 BRC 三种子基线
 
@@ -498,10 +498,39 @@ env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 CUDA_HOME=/usr/local/cuda-
 
 ### `EXP-FP8-TARGET-LAG-S42`
 
-- 状态：预登记；仅在 lag 实现测试、留痕、提交、推送且 worktree clean 后启动。
+- 状态：运行中；2026-08-24 16:47:19 Asia/Shanghai 从干净提交 `1c135af` 在 GPU1 的独立 tmux 中从头启动，无 checkpoint 转换。
 - 目的：首轮闭环可行性。比较 B `816.37`、target-forward `757.81` 与 naive resident D-R1 的 125k `7.23`；单 seed 不作统计显著性或吞吐结论。
 - 协议：Dogs seed 42、500k、start 5k、replay 1M、batch 1024、2 updates/step、width 4096、paper alignment、reward-mean bootstrap、25k eval/tensor stats、50k analysis、100k recovery。在线 `fp8_direct`，目标 `fp8_lag`。除 NaN/Inf 或运行故障外不提前停止。
-- 名称：tmux、run ID 与 W&B name 统一为 `brc_dmc_dogs_target_fp8_lag_s42`；GPU 在启动前按空闲显存选择并在启动记录中补齐。
+- 运行：tmux、run ID 与 W&B name 统一为 `brc_dmc_dogs_target_fp8_lag_s42`，PID `1599548`，物理 GPU1；[W&B `nu2d5b90`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/nu2d5b90)。
+- 启动验证：提交与远端均为 `1c135aff90d031eb785d55d320f8bdf2044dd56e`，metadata `git_status` 为空；CUDA root/home 与 `ptxas 12.8.61` 均来自 `/usr/local/cuda-12.8`。解析配置明确记录 online `fp8_direct`、target `fp8_lag`、E4M3 lag 常驻、FP32 online+lag 重建、无 derived cache。step 5,000 首更完成：critic loss `23.401`、critic grad norm `19.977`、actor loss `26.865`、actor grad norm `22.586`，NaN/Inf `0/0`。
+
+```bash
+tmux new-session -d -s brc_dmc_dogs_target_fp8_lag_s42 \
+  'env -u LD_LIBRARY_PATH bash -c "
+    cd /home/caiyuliang/BRC_FP8_blackwell_fp8 &&
+    export CUDA_ROOT=/usr/local/cuda-12.8 &&
+    export CUDA_HOME=/usr/local/cuda-12.8 &&
+    export PATH=/usr/local/cuda-12.8/bin:\$PATH &&
+    export CUDA_VISIBLE_DEVICES=1 &&
+    export XLA_PYTHON_CLIENT_PREALLOCATE=false &&
+    exec /home/caiyuliang/anaconda3/envs/brc/bin/python train.py \
+      --env_names=DMC_DOGS --seed=42 --eval_seed_offset=0 \
+      --max_steps=500000 --start_training=5000 \
+      --replay_buffer_size=1000000 --batch_size=1024 --updates_per_step=2 \
+      --width_critic=4096 --critic_precision=fp8_direct \
+      --target_critic_precision=fp8_lag --fp8_amax_history_length=1024 \
+      --paper_alignment=true --return_bootstrap=reward_mean \
+      --eval_interval=25000 --eval_episodes=10 --offline_evaluation=true \
+      --render=false --log_to_wandb=true \
+      --wandb_name=brc_dmc_dogs_target_fp8_lag_s42 \
+      --run_root=runs --run_id=brc_dmc_dogs_target_fp8_lag_s42 \
+      --metrics_interval=1000 --metrics_flush_interval=1000 \
+      --system_metrics_interval_sec=10 --profile_interval=25000 --profile_window=10 \
+      --tensor_stats_interval=25000 --analysis_checkpoint_interval=50000 \
+      --recovery_checkpoint_interval=100000 --keep_last_analysis_checkpoints=2 \
+      --keep_last_recovery_checkpoints=1 --save_replay_buffer=true
+  "'
+```
 
 ## 更新规则
 

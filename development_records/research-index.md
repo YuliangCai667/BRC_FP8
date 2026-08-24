@@ -7,7 +7,7 @@
 - 当前目标 FP8 前向 / FP32 存储实现：`186d153ea8f715b6a2aa18be6c50881b3d03f3dc`，已推送到对应远端分支。
 - 当前目标：已确认朴素常驻 FP8 目标的逐步 EMA 存在时间分辨率失配；并行筛选能够保留累计更新、同时限制 bootstrap 误差传播的自适应方法。
 - 当前离线实现：`2091e7e`；scaled Kahan-momentum FP8 baseline 与 30k screen 已完成并推送。
-- 当前闭环实现：`2091e7e` 加 `fp8_lag` 待提交改动；width-512 smoke 已完成，正式 Dogs seed-42 待从干净提交启动。
+- 当前闭环实现：`1c135af`；`fp8_lag` 已验证并推送，正式 Dogs seed-42 已从该干净提交启动。
 
 ## 文档登记
 
@@ -49,5 +49,5 @@
 - `EXP-FP8-TARGET-OFFLINE-SMOKE` / `EXP-FP8-TARGET-OFFLINE-50K`：均完成；lag-coded 明显接近 FP32 teacher，首版 interleaved 未恢复时间分辨率。
 - `EXP-FP8-TARGET-KAHAN-OFFLINE-30K`：完成；30,000 updates / 60 点，全部有限。FP8 scaled Kahan 未改善 naive target 漂移，保留为 prior-art baseline。
 - `EXP-FP8-TARGET-LAG-SMOKE`：完成；GPU1，203 updates，498 条 tensor stats，HLO 与数值验收通过。
-- `EXP-FP8-TARGET-LAG-S42`：预登记，待从干净 lag commit 启动 Dogs seed-42 500k。
+- `EXP-FP8-TARGET-LAG-S42`：运行中；GPU1，clean `1c135af`，W&B `nu2d5b90`；step 5k 首更有限、NaN/Inf `0/0`。
 - 下一决策门：比较 D-lag 的完整 return 与 B `816.37`、target-forward `757.81`；bootstrap 仍只做功能空间诊断，不修改学习目标。

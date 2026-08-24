@@ -281,8 +281,10 @@ All target forward consumers reconstruct through one shared entry. Only the
 training bootstrap advances target input/kernel delayed-scaling metadata;
 diagnostics, time-limit queries, and evaluation are read-only. The first
 width-512 closed-loop smoke completed 203 learner updates without NaN/Inf.
-Formal Dogs seed-42 D-lag is the next decision gate; no closed-loop learning
-claim is made from the smoke.
+Formal Dogs seed-42 D-lag started from clean commit `1c135af` on GPU1 as
+W&B `nu2d5b90` and passed its first learner update without NaN/Inf. It is the
+next decision gate; no closed-loop learning claim is made before its return and
+functional diagnostics mature.
 
 ### Diagnostic and intermediate controls
 
