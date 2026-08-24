@@ -68,14 +68,23 @@ native FP8 GEMMs. Input and kernel per-tensor delayed-scaling histories advance
 once per training bootstrap forward; target diagnostics and evaluation are
 read-only, and no target backward pass is introduced.
 
+For lag-coded persistent target state, use
+`--target_critic_precision=fp8_lag`. The four residual kernels store only
+`target - online` as E4M3 codes with one current-amax FP32 scale per ensemble
+member. Their target value is reconstructed transiently as FP32
+`online + dequantized_lag`, then passed through the same delayed-scaling native
+FP8 Direct forward. Other target leaves retain the original FP32 EMA. There is
+no FP32 master for the four target kernels and no derived FP8 target cache.
+
 The controlled target experiments are:
 
 - C: `--critic_precision=fp32 --target_critic_precision=fp8_resident`
 - D: `--critic_precision=fp8_direct --target_critic_precision=fp8_resident`
 - Target-forward-only: `--critic_precision=fp8_direct --target_critic_precision=fp8_direct`
+- D-lag: `--critic_precision=fp8_direct --target_critic_precision=fp8_lag`
 
 FP8-target checkpoints support same-mode recovery only. Converting an existing
-FP32 target checkpoint to either direct or resident FP8 is intentionally
+FP32 target checkpoint to direct, resident, or lag-coded FP8 is intentionally
 unsupported in these mechanism tests.
 
 ### Offline target-state simulation

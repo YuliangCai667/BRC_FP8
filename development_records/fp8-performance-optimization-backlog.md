@@ -65,6 +65,15 @@ Reference: NVIDIA Transformer Engine, "FP8 Delayed Scaling": https://docs.nvidia
 
 Disposition as of 2026-08-23: `implementation / stability test`. The target-Critic residual kernels are being made truly E4M3-resident and passed directly to the FP8 dot, without an FP32 master or shadow. The shared-GPU C/D experiments are not a performance benchmark; conversion savings require a later exclusive-GPU profile and optimized-HLO evidence.
 
+Lag-coded follow-up, 2026-08-24: `fp8_lag` intentionally persists only the
+E4M3 lag. Every target forward currently reconstructs
+`FP32 online + dequantized lag` and requantizes that temporary kernel for the
+native FP8 GEMM. A derived E4M3 target-kernel cache could move this reconstruction
+and cast to the learner-update boundary, but would add another FP8 matrix state
+and cache-write traffic. Treat it as a later exclusive-GPU optimization; do not
+add it until closed-loop stability is established and profiling shows repeated
+RHS conversion is material.
+
 ### Reuse or precompute transposed FP8 weights
 
 - Backward input-gradient GEMMs need a transposed logical view of weights.

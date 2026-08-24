@@ -6,7 +6,8 @@
 - 当前常驻目标实现：`f88b6628d39caec72f48e0e22d4d8dde815d1745`，已推送到对应远端分支。
 - 当前目标 FP8 前向 / FP32 存储实现：`186d153ea8f715b6a2aa18be6c50881b3d03f3dc`，已推送到对应远端分支。
 - 当前目标：已确认朴素常驻 FP8 目标的逐步 EMA 存在时间分辨率失配；并行筛选能够保留累计更新、同时限制 bootstrap 误差传播的自适应方法。
-- 当前离线实现：`50814df` 加未提交的 scaled Kahan-momentum FP8 baseline；30k screen 已完成，Kahan 的 `C*target` 与 compensation 均为 E4M3 动态缩放状态。
+- 当前离线实现：`2091e7e`；scaled Kahan-momentum FP8 baseline 与 30k screen 已完成并推送。
+- 当前闭环实现：`2091e7e` 加 `fp8_lag` 待提交改动；width-512 smoke 已完成，正式 Dogs seed-42 待从干净提交启动。
 
 ## 文档登记
 
@@ -21,6 +22,7 @@
 | 目标 FP8 前向改动 | [2026-08-24-fp8-target-forward.md](2026-08-24-fp8-target-forward.md) | FP32 目标存储下的 FP8 bootstrap 前向消融 | 2026-08-24 |
 | 目标状态离线模拟 | [2026-08-24-fp8-target-offline-simulation.md](2026-08-24-fp8-target-offline-simulation.md) | 共享 teacher 轨迹下的 lag-coded / interleaved block 方法筛选 | 2026-08-24 |
 | FP8 Kahan 基线 | [2026-08-24-fp8-kahan-target-offline.md](2026-08-24-fp8-kahan-target-offline.md) | FP16 SAC Kahan-momentum 的 FP8 适配、验证与限制 | 2026-08-24 |
+| Lag-coded 目标闭环 | [2026-08-24-lag-coded-fp8-target.md](2026-08-24-lag-coded-fp8-target.md) | lag 常驻状态、统一重建、原生 FP8 前向与闭环验证 | 2026-08-24 |
 
 ## 已验证事实
 
@@ -34,6 +36,7 @@
 - 当前归因是“目标 FP8 状态的时间分辨率失配 → 目标无法跟踪在线网络 → bootstrap 反馈放大学习停滞”；无 NaN/Inf，且 FP8 前向相对同一反量化权重的误差很小，因此不是普通溢出或 GEMM 前向误差。
 - 固定健康 checkpoint 的 50k open-loop screen 中，lag-coded 终点 target relative error 为 `0.006665`，naive per-tensor / block / interleaved 为 `0.345703/0.352283/0.346894`；lag 已通过第一轮机制筛选，首版 interleaved 只带来很小改善。
 - 同 checkpoint 的 30k Kahan screen 中，lag/Kahan target relative error 为 `0.007725/0.258575`，expected-Q MAE 为 `0.001216/0.141415`；Kahan 与 naive per-tensor 在 60 个点上几乎重合，且需要两份而非一份 FP8 matrix state。
+- `fp8_lag` 闭环 smoke 完成 200 env steps / 203 learner updates，loss/梯度/lag/metadata 的 NaN/Inf 均为 0；实际 EMA 的 L2 ratio 为 `0.999993–1.000002`，相对误差为 `1.09e-4–1.55e-4`。
 
 ## 当前实验与决策门
 
@@ -45,4 +48,6 @@
 - `EXP-FP8-TARGET-FWD-S42`：完成；在线/目标均 FP8 Direct，目标参数与 EMA 保持 FP32，W&B `gij6jhgd`；500k 最终 return `757.81`，无数值失败。
 - `EXP-FP8-TARGET-OFFLINE-SMOKE` / `EXP-FP8-TARGET-OFFLINE-50K`：均完成；lag-coded 明显接近 FP32 teacher，首版 interleaved 未恢复时间分辨率。
 - `EXP-FP8-TARGET-KAHAN-OFFLINE-30K`：完成；30,000 updates / 60 点，全部有限。FP8 scaled Kahan 未改善 naive target 漂移，保留为 prior-art baseline。
-- 下一决策门：lag-coded 已通过两个共享-teacher open-loop screen，可进入闭环 target-state/forward 设计；Kahan 不启动正式闭环实验。bootstrap 仍只做功能空间诊断，不修改学习目标。
+- `EXP-FP8-TARGET-LAG-SMOKE`：完成；GPU1，203 updates，498 条 tensor stats，HLO 与数值验收通过。
+- `EXP-FP8-TARGET-LAG-S42`：预登记，待从干净 lag commit 启动 Dogs seed-42 500k。
+- 下一决策门：比较 D-lag 的完整 return 与 B `816.37`、target-forward `757.81`；bootstrap 仍只做功能空间诊断，不修改学习目标。

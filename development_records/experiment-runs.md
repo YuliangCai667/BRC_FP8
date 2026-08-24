@@ -28,6 +28,8 @@
 | 2026-08-24 | `dogs_s42_step100k_lag_interleaved` | 完成 | `EXP-FP8-TARGET-OFFLINE-50K`：共享健康 teacher 的四路目标状态筛选 | 42 / GPU 3 | `codex/blackwell-fp8-direct` @ `50814df`，clean | 50k updates / 100 诊断点；lag target relative error `0.00667`，其余三路 `0.346`–`0.352` |
 | 2026-08-24 | `dogs_s42_step100k_kahan_smoke100` | 完成 | `EXP-FP8-TARGET-KAHAN-SMOKE`：Kahan 双 E4M3 buffer 的 checkpoint 验收 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `50814df` + Kahan 未提交实现 | 100 updates / 2 诊断点；所有状态与指标有限，无 NaN/Inf |
 | 2026-08-24 | `dogs_s42_step100k_kahan_lag_30k` | 完成 | `EXP-FP8-TARGET-KAHAN-OFFLINE-30K`：FP8 Kahan-momentum 与 lag-coded 同轨迹比较 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `50814df` + Kahan 未提交实现 | 30k / 60 点，无 NaN/Inf；Kahan state error `0.25858`，lag `0.00773` |
+| 2026-08-24 16:32 | `brc_cheetah_run_target_fp8_lag_s0_smoke` | 完成 | `EXP-FP8-TARGET-LAG-SMOKE`：lag-coded target 闭环短跑 | 0 / GPU 1 | `2091e7e` + lag 未提交实现 | 200 steps / 203 updates；NaN/Inf `0/0`；498 条 tensor stats；HLO 与数值验收通过 |
+| 待启动 | `brc_dmc_dogs_target_fp8_lag_s42` | 预登记 | `EXP-FP8-TARGET-LAG-S42`：在线 FP8 Direct、目标 lag 常驻 FP8 | 42 / 待选最空闲 GPU | 待 lag 干净提交 | Dogs 500k；只看闭环学习与稳定性，不设 return 自动停止阈值 |
 
 ## 已完成：原始 BRC 三种子基线
 
@@ -479,6 +481,27 @@ env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 CUDA_HOME=/usr/local/cuda-
   --output_root=runs/offline_target_simulations \
   --run_id=dogs_s42_step100k_kahan_lag_30k
 ```
+
+## Lag-coded FP8 目标闭环
+
+### `EXP-FP8-TARGET-LAG-SMOKE`
+
+- 状态：完成；2026-08-24 16:32 Asia/Shanghai 在 GPU1 前台运行，200 env steps / 203 learner updates，正常写入 `run_finished`。
+- 版本：`2091e7e` 加待提交 lag 实现；只作实现验收，不作为正式学习或性能证据。
+- 配置：`cheetah-run`、seed 0、width 512、batch 256、2 updates/step、start 100；在线 `fp8_direct`、目标 `fp8_lag`；W&B/eval/video/profile/checkpoint 关闭，tensor stats 在 step 150 记录。
+- 验收：训练 NaN/Inf `0/0`，loss、梯度、重建 target、lag codes/scale 和 metadata 全部有限；498 条 tensor stats。八张物理矩阵的 lag underflow 为 `1.14e-5–5.39e-5`，applied/intended L2 为 `0.999993–1.000002`，相对更新误差为 `1.09e-4–1.55e-4`。
+- HLO：Blackwell/CUDA 12.8 target-only 优化后 HLO 含恰好四个 `__cublas$lt$matmul$f8`；RHS 明确执行 lag E4M3 解码、乘 scale、加 FP32 online、再转 E4M3；无 E5M2 target backward。
+
+```bash
+env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 CUDA_HOME=/usr/local/cuda-12.8 PATH=/usr/local/cuda-12.8/bin:/usr/bin:/bin CUDA_VISIBLE_DEVICES=1 XLA_PYTHON_CLIENT_PREALLOCATE=false /home/caiyuliang/anaconda3/envs/brc/bin/python train.py --env_names=cheetah-run --seed=0 --eval_seed_offset=0 --max_steps=200 --start_training=100 --replay_buffer_size=2000 --batch_size=256 --updates_per_step=2 --width_critic=512 --critic_precision=fp8_direct --target_critic_precision=fp8_lag --fp8_amax_history_length=1024 --paper_alignment=true --return_bootstrap=reward_mean --eval_interval=0 --eval_episodes=1 --offline_evaluation=true --render=false --log_to_wandb=false --run_root=runs --run_id=brc_cheetah_run_target_fp8_lag_s0_smoke --metrics_interval=25 --metrics_flush_interval=25 --system_metrics_interval_sec=10 --profile_interval=0 --tensor_stats_interval=150 --analysis_checkpoint_interval=0 --recovery_checkpoint_interval=0 --keep_last_analysis_checkpoints=0 --keep_last_recovery_checkpoints=0 --save_replay_buffer=false
+```
+
+### `EXP-FP8-TARGET-LAG-S42`
+
+- 状态：预登记；仅在 lag 实现测试、留痕、提交、推送且 worktree clean 后启动。
+- 目的：首轮闭环可行性。比较 B `816.37`、target-forward `757.81` 与 naive resident D-R1 的 125k `7.23`；单 seed 不作统计显著性或吞吐结论。
+- 协议：Dogs seed 42、500k、start 5k、replay 1M、batch 1024、2 updates/step、width 4096、paper alignment、reward-mean bootstrap、25k eval/tensor stats、50k analysis、100k recovery。在线 `fp8_direct`，目标 `fp8_lag`。除 NaN/Inf 或运行故障外不提前停止。
+- 名称：tmux、run ID 与 W&B name 统一为 `brc_dmc_dogs_target_fp8_lag_s42`；GPU 在启动前按空闲显存选择并在启动记录中补齐。
 
 ## 更新规则
 

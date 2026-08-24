@@ -47,9 +47,9 @@ flags.DEFINE_enum(
 )
 flags.DEFINE_enum(
     'target_critic_precision', 'fp32',
-    ['fp32', 'fp8_direct', 'fp8_resident'],
+    ['fp32', 'fp8_direct', 'fp8_resident', 'fp8_lag'],
     'Target critic residual Dense mode: FP32, FP8-direct compute with FP32 '
-    'parameters, or resident E4M3 kernels.',
+    'parameters, resident E4M3 kernels, or resident E4M3 lag state.',
 )
 flags.DEFINE_integer(
     'fp8_amax_history_length', 1024,
@@ -177,7 +177,7 @@ def main(_):
     config = FLAGS.flag_values_dict()
     config.update({f'resolved_{key}': value for key, value in resolved_alignment.items()})
     target_fp8_compute = FLAGS.target_critic_precision in (
-        'fp8_direct', 'fp8_resident'
+        'fp8_direct', 'fp8_resident', 'fp8_lag'
     )
     config.update({
         'resolved_target_fp8_compute_scope': (
@@ -186,19 +186,27 @@ def main(_):
         'resolved_target_fp8_storage_scope': (
             'residual_dense_kernels'
             if FLAGS.target_critic_precision == 'fp8_resident'
-            else 'none'
+            else (
+                'residual_dense_lag_state'
+                if FLAGS.target_critic_precision == 'fp8_lag'
+                else 'none'
+            )
         ),
         'resolved_target_parameter_storage': (
             'e4m3_residual_dense_kernels_otherwise_fp32'
             if FLAGS.target_critic_precision == 'fp8_resident'
-            else 'fp32_all_parameters'
+            else (
+                'e4m3_lag_residual_dense_kernels_otherwise_fp32'
+                if FLAGS.target_critic_precision == 'fp8_lag'
+                else 'fp32_all_parameters'
+            )
         ),
         'resolved_target_fp8_weight_scaling': (
             'dynamic_current_amax_per_tensor'
             if FLAGS.target_critic_precision == 'fp8_resident'
             else (
                 'delayed_amax_history_per_tensor'
-                if FLAGS.target_critic_precision == 'fp8_direct'
+                if FLAGS.target_critic_precision in ('fp8_direct', 'fp8_lag')
                 else 'none'
             )
         ),
@@ -207,7 +215,7 @@ def main(_):
             if FLAGS.target_critic_precision == 'fp8_resident'
             else (
                 'delayed_amax_history_per_tensor'
-                if FLAGS.target_critic_precision == 'fp8_direct'
+                if FLAGS.target_critic_precision in ('fp8_direct', 'fp8_lag')
                 else 'none'
             )
         ),
@@ -217,8 +225,23 @@ def main(_):
             else (
                 'ema_requantization_kernel_scale'
                 if FLAGS.target_critic_precision == 'fp8_resident'
-                else 'none'
+                else (
+                    'bootstrap_forward_input_kernel_and_lag_requantization'
+                    if FLAGS.target_critic_precision == 'fp8_lag'
+                    else 'none'
+                )
             )
+        ),
+        'resolved_target_reconstruction': (
+            'fp32_online_plus_dequantized_lag'
+            if FLAGS.target_critic_precision == 'fp8_lag'
+            else 'none'
+        ),
+        'resolved_target_kernel_cache': 'none',
+        'resolved_target_lag_scaling': (
+            'dynamic_current_amax_per_tensor'
+            if FLAGS.target_critic_precision == 'fp8_lag'
+            else 'none'
         ),
     })
     env_names = get_environment_list(FLAGS.env_names)
@@ -442,7 +465,9 @@ def main(_):
                     FLAGS.updates_per_step,
                     i,
                     collect_target_ema_diagnostics=(
-                        FLAGS.target_critic_precision == 'fp8_resident'
+                        FLAGS.target_critic_precision in (
+                            'fp8_resident', 'fp8_lag'
+                        )
                         and FLAGS.tensor_stats_interval > 0
                         and i % FLAGS.tensor_stats_interval == 0
                     ),
@@ -493,6 +518,9 @@ def main(_):
                     ),
                     'target_fp8_resident_enabled': float(
                         FLAGS.target_critic_precision == 'fp8_resident'
+                    ),
+                    'target_fp8_lag_enabled': float(
+                        FLAGS.target_critic_precision == 'fp8_lag'
                     ),
                     'window_train_sec': active_sec,
                     'env_steps_per_sec': active_steps / active_sec,

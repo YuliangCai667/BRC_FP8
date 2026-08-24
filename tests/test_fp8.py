@@ -10,6 +10,7 @@ from flax import traverse_util
 from jaxrl.agent.brc_learner import BRC
 from jaxrl.agent.update import (
     dequantize_target_params,
+    reconstruct_target_params,
     target_ema_diagnostics,
     update_target_critic,
 )
@@ -54,6 +55,217 @@ def assert_trees_equal(test, left, right):
 
 
 class Fp8CriticTest(unittest.TestCase):
+    def test_lag_target_scope_initial_reconstruction_and_recurrence(self):
+        agent = make_agent('fp8_direct', 'fp8_lag')
+        raw_params = traverse_util.flatten_dict(
+            agent.target_critic.params
+        )
+        metadata = traverse_util.flatten_dict(agent.target_critic.fp8_meta)
+        lag_paths = [
+            path for path, value in raw_params.items()
+            if value.dtype == jax.numpy.float8_e4m3fn
+        ]
+        self.assertEqual(len(lag_paths), 4)
+        self.assertTrue(all(
+            '/BronetBlock_' in '/'.join(path) and path[-1] == 'kernel'
+            for path in lag_paths
+        ))
+        self.assertEqual(
+            sum(path[-1] == 'lag_scale' for path in metadata), 4
+        )
+        self.assertTrue(all(
+            value.dtype == np.dtype(np.float32)
+            for path, value in raw_params.items()
+            if path not in lag_paths
+        ))
+        assert_trees_equal(
+            self,
+            reconstruct_target_params(agent.critic, agent.target_critic),
+            agent.critic.params,
+        )
+
+        old_critic = agent.critic
+        old_online = traverse_util.flatten_dict(old_critic.params)
+        next_online = dict(old_online)
+        for index, path in enumerate(lag_paths):
+            delta = np.full(
+                old_online[path].shape, (index + 1) * 1e-3, np.float32
+            )
+            next_online[path] = old_online[path] + delta
+        new_critic = old_critic.replace(
+            params=traverse_util.unflatten_dict(next_online)
+        )
+        updated = update_target_critic(
+            new_critic, agent.target_critic, 0.005,
+            old_critic=old_critic,
+        )
+        updated_params = traverse_util.flatten_dict(updated.params)
+        updated_meta = traverse_util.flatten_dict(updated.fp8_meta)
+        for path in lag_paths:
+            candidate = -0.995 * (
+                next_online[path] - old_online[path]
+            )
+            expected_codes, expected_scale = jax.vmap(
+                quantize_e4m3_per_tensor
+            )(candidate)
+            np.testing.assert_array_equal(
+                np.asarray(updated_params[path]), np.asarray(expected_codes)
+            )
+            np.testing.assert_array_equal(
+                np.asarray(updated_meta[path[:-1] + ('lag_scale',)]),
+                np.asarray(expected_scale),
+            )
+            reconstructed = traverse_util.flatten_dict(
+                reconstruct_target_params(new_critic, updated)
+            )[path]
+            intended = (
+                old_online[path]
+                + 0.005 * (next_online[path] - old_online[path])
+            )
+            applied_lag = jax.vmap(dequantize_e4m3)(
+                expected_codes, expected_scale
+            )
+            np.testing.assert_allclose(
+                np.asarray(reconstructed),
+                np.asarray(next_online[path] + applied_lag),
+                rtol=0,
+                atol=2e-9,
+            )
+            self.assertLess(
+                float(np.linalg.norm(np.asarray(reconstructed - intended))),
+                2e-5,
+            )
+
+        online_after_first = traverse_util.flatten_dict(new_critic.params)
+        online_after_second = dict(online_after_first)
+        for index, path in enumerate(lag_paths):
+            online_after_second[path] = (
+                online_after_first[path] - (index + 1) * 7e-4
+            )
+        second_critic = new_critic.replace(
+            params=traverse_util.unflatten_dict(online_after_second)
+        )
+        updated_twice = update_target_critic(
+            second_critic, updated, 0.005, old_critic=new_critic
+        )
+        first_params = traverse_util.flatten_dict(updated.params)
+        first_meta = traverse_util.flatten_dict(updated.fp8_meta)
+        second_params = traverse_util.flatten_dict(updated_twice.params)
+        second_meta = traverse_util.flatten_dict(updated_twice.fp8_meta)
+        for path in lag_paths:
+            old_lag = jax.vmap(dequantize_e4m3)(
+                first_params[path],
+                first_meta[path[:-1] + ('lag_scale',)],
+            )
+            candidate = 0.995 * (
+                old_lag
+                - (online_after_second[path] - online_after_first[path])
+            )
+            expected_codes, expected_scale = jax.vmap(
+                quantize_e4m3_per_tensor
+            )(candidate)
+            np.testing.assert_array_equal(
+                np.asarray(second_params[path]), np.asarray(expected_codes)
+            )
+            np.testing.assert_array_equal(
+                np.asarray(second_meta[path[:-1] + ('lag_scale',)]),
+                np.asarray(expected_scale),
+            )
+
+    def test_lag_target_updates_forward_metadata_and_reports_underflow(self):
+        agent = make_agent('fp8_direct', 'fp8_lag')
+        initial_meta = traverse_util.flatten_dict(
+            jax.tree.map(
+                lambda value: np.asarray(value).copy(),
+                agent.target_critic.fp8_meta,
+            )
+        )
+        info = agent.update(
+            make_batch(), 1, env_step=1,
+            collect_target_ema_diagnostics=True,
+        )
+        jax.block_until_ready(info)
+        updated_meta = traverse_util.flatten_dict(agent.target_critic.fp8_meta)
+        for path, before in initial_meta.items():
+            after = updated_meta[path]
+            if 'output_grad' in path[-1]:
+                np.testing.assert_array_equal(after, before)
+            elif path[-1].endswith('_amax_history'):
+                self.assertGreater(np.count_nonzero(np.asarray(after)), 0)
+
+        meta_before_diagnostics = jax.tree.map(
+            lambda value: np.asarray(value).copy(),
+            agent.target_critic.fp8_meta,
+        )
+        probe = Batch(*[value[0] for value in make_batch()])
+        diagnostics = agent.get_tensor_diagnostics(probe)
+        jax.block_until_ready(diagnostics)
+        self.assertIn('fp8_target_forward', diagnostics)
+        self.assertIn('fp8_target_lag', diagnostics)
+        self.assertNotIn('fp8_target_storage', diagnostics)
+        self.assertEqual(len(diagnostics['fp8_target_forward']), 8)
+        self.assertEqual(
+            len(diagnostics['fp8_target_lag']['last_applied_ema']), 8
+        )
+        assert_trees_equal(
+            self, meta_before_diagnostics, agent.target_critic.fp8_meta
+        )
+
+        underflow_agent = make_agent('fp8_direct', 'fp8_lag')
+        old_critic = underflow_agent.critic
+        old_online = traverse_util.flatten_dict(old_critic.params)
+        next_online = dict(old_online)
+        lag_path = next(
+            path for path, value in traverse_util.flatten_dict(
+                underflow_agent.target_critic.params
+            ).items()
+            if value.dtype == jax.numpy.float8_e4m3fn
+        )
+        delta = np.full(old_online[lag_path].shape, 1.0, np.float32)
+        delta[0, 0, 0] = 1e-6
+        next_online[lag_path] = old_online[lag_path] + delta
+        new_critic = old_critic.replace(
+            params=traverse_util.unflatten_dict(next_online)
+        )
+        underflow = target_ema_diagnostics(
+            new_critic, underflow_agent.target_critic, 0.005,
+            old_critic=old_critic,
+        )
+        jax.block_until_ready(underflow)
+        self.assertTrue(any(
+            float(row['lag_candidate_underflow_fraction']) > 0
+            for row in underflow.values()
+        ))
+
+    def test_lag_target_checkpoint_round_trip_and_next_update(self):
+        source = make_agent('fp8_direct', 'fp8_lag')
+        batch = make_batch()
+        source.update(batch, 1, env_step=1)
+        with tempfile.TemporaryDirectory() as temp:
+            source.save(temp, include_optimizer=True)
+            restored = make_agent('fp8_direct', 'fp8_lag')
+            restored.load(temp)
+            assert_trees_equal(
+                self, source.target_critic.params,
+                restored.target_critic.params,
+            )
+            assert_trees_equal(
+                self, source.target_critic.fp8_meta,
+                restored.target_critic.fp8_meta,
+            )
+            source_info = source.update(batch, 1, env_step=2)
+            restored_info = restored.update(batch, 1, env_step=2)
+            jax.block_until_ready((source_info, restored_info))
+            assert_trees_equal(self, source_info, restored_info)
+            assert_trees_equal(
+                self, source.target_critic.params,
+                restored.target_critic.params,
+            )
+            assert_trees_equal(
+                self, source.target_critic.fp8_meta,
+                restored.target_critic.fp8_meta,
+            )
+
     def test_only_online_residual_dense_layers_use_fp8(self):
         fp32 = make_agent('fp32')
         fp8 = make_agent('fp8_direct')
@@ -451,6 +663,19 @@ class Fp8CriticTest(unittest.TestCase):
                 {
                     'critic_precision': 'fp32',
                     'target_critic_precision': 'fp8_direct',
+                    'fp8_amax_history_length': 16,
+                },
+            )
+        with self.assertRaises(ValueError):
+            validate_checkpoint_config(
+                {
+                    'critic_precision': 'fp8_direct',
+                    'target_critic_precision': 'fp8_lag',
+                    'fp8_amax_history_length': 8,
+                },
+                {
+                    'critic_precision': 'fp8_direct',
+                    'target_critic_precision': 'fp8_lag',
                     'fp8_amax_history_length': 16,
                 },
             )

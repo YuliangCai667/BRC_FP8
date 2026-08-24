@@ -63,7 +63,7 @@ def validate_checkpoint_config(previous: Mapping[str, Any], current: Mapping[str
         if (
             key == "fp8_amax_history_length"
             and old_precision != "fp8_direct"
-            and old_target_precision != "fp8_direct"
+            and old_target_precision not in ("fp8_direct", "fp8_lag")
         ):
             continue
         old = checkpoint_config_value(previous, key)

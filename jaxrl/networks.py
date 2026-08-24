@@ -209,7 +209,9 @@ class QValue(nn.Module):
             activations=self.activations,
             add_final_layer=True,
             output_nodes=self.output_nodes,
-            fp8_residual_blocks=self.critic_precision == 'fp8_direct',
+            fp8_residual_blocks=self.critic_precision in (
+                'fp8_direct', 'fp8_lag'
+            ),
             resident_fp8_residual_blocks=self.critic_precision == 'fp8_resident',
             fp8_amax_history_length=self.fp8_amax_history_length,
         )
@@ -229,7 +231,9 @@ class QValueEnsemble(nn.Module):
     
     def setup(self):
         variable_axes = {'params': 0, 'intermediates': 0}
-        if self.critic_precision in ('fp8_direct', 'fp8_resident'):
+        if self.critic_precision in (
+            'fp8_direct', 'fp8_resident', 'fp8_lag'
+        ):
             variable_axes[OVERWRITE_WITH_GRADIENT] = 0
         VmapCritic = nn.vmap(QValue,
                              variable_axes=variable_axes,

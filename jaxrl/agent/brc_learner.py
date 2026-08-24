@@ -9,10 +9,10 @@ from flax import traverse_util
 
 from jaxrl.agent.update import (
     build_actor_input,
-    dequantize_target_params,
     get_actor_gradients,
     get_critic_gradients,
     initialize_target_critic,
+    reconstruct_target_params,
     target_ema_diagnostics,
     update_actor,
     update_critic,
@@ -89,7 +89,13 @@ def _estimate_bootstrap_values(
     policy = actor(inputs)
     rng, key = jax.random.split(rng)
     actions = policy.sample(seed=key)
-    logits = target_critic(observations, actions, task_ids)
+    target_params = reconstruct_target_params(critic, target_critic)
+    logits = target_critic.apply_fn.apply(
+        target_critic.variables(params=target_params),
+        observations,
+        actions,
+        task_ids,
+    )
     probabilities = jax.nn.softmax(logits, axis=-1).mean(axis=0)
     support = jnp.linspace(-v_max, v_max, num_bins)
     return rng, (probabilities * support).sum(axis=-1)
@@ -159,8 +165,9 @@ def _get_forward_diagnostics(
         batch.task_ids,
         mutable=['intermediates'],
     )
+    target_params = reconstruct_target_params(critic, target_critic)
     target_logits, target_intermediates = target_critic.apply_fn.apply(
-        target_critic.variables(),
+        target_critic.variables(params=target_params),
         batch.observations,
         batch.actions,
         batch.task_ids,
@@ -299,11 +306,15 @@ def _update(
     rng, actor_key, critic_key = jax.random.split(rng, 3)
     new_critic, target_critic, critic_info = update_critic(critic_key, actor, critic, target_critic, temp, batch, discount, num_bins, v_max, multitask)
     ema_diagnostics = (
-        target_ema_diagnostics(new_critic, target_critic, tau)
+        target_ema_diagnostics(
+            new_critic, target_critic, tau, old_critic=critic
+        )
         if collect_target_ema_diagnostics
         else {}
     )
-    new_target_critic = update_target_critic(new_critic, target_critic, tau)
+    new_target_critic = update_target_critic(
+        new_critic, target_critic, tau, old_critic=critic
+    )
     new_actor, new_critic, actor_info = update_actor(
         actor_key, actor, new_critic, temp, batch, num_bins, v_max, multitask, num_tasks
     )
@@ -592,7 +603,9 @@ class BRC(object):
 
     def get_tensor_diagnostics(self, batch: Batch):
         """Return device-resident trees used only at tensor-stat intervals."""
-        target_params = dequantize_target_params(self.target_critic)
+        target_params = reconstruct_target_params(
+            self.critic, self.target_critic
+        )
         target_reference = None
         if self.target_critic.fp8_meta is not None:
             target_reference = self.target_critic.replace(
@@ -626,7 +639,11 @@ class BRC(object):
             'params': {
                 'actor': self.actor.params,
                 'critic': self.critic.params,
-                'target_critic_dequantized': target_params,
+                (
+                    'target_critic_reconstructed'
+                    if self.target_critic_precision == 'fp8_lag'
+                    else 'target_critic_dequantized'
+                ): target_params,
                 'temperature': self.temp.params,
             },
             'optimizer': {
@@ -639,7 +656,7 @@ class BRC(object):
         }
         if self.critic.fp8_meta is not None:
             diagnostics['fp8'] = self._fp8_diagnostics(self.critic)
-        if self.target_critic_precision == 'fp8_direct':
+        if self.target_critic_precision in ('fp8_direct', 'fp8_lag'):
             diagnostics['fp8_target_forward'] = self._fp8_diagnostics(
                 self.target_critic, include_output_grad=False
             )
@@ -667,6 +684,30 @@ class BRC(object):
                     self.last_target_ema_diagnostics
                 )
             diagnostics['fp8_target_storage'] = target_storage
+        if self.target_critic_precision == 'fp8_lag':
+            target_params_flat = traverse_util.flatten_dict(
+                self.target_critic.params, sep='/'
+            )
+            target_meta_flat = traverse_util.flatten_dict(
+                self.target_critic.fp8_meta, sep='/'
+            )
+            lag_storage = {
+                'codes': _split_ensemble_arrays({
+                    path: value
+                    for path, value in target_params_flat.items()
+                    if value.dtype == jnp.float8_e4m3fn
+                }),
+                'lag_scales': _split_ensemble_arrays({
+                    path: value
+                    for path, value in target_meta_flat.items()
+                    if path.endswith('/lag_scale')
+                }),
+            }
+            if self.last_target_ema_diagnostics is not None:
+                lag_storage['last_applied_ema'] = (
+                    self.last_target_ema_diagnostics
+                )
+            diagnostics['fp8_target_lag'] = lag_storage
         return diagnostics
 
     def _fp8_diagnostics(self, model, include_output_grad=True):
@@ -719,7 +760,9 @@ class BRC(object):
         target_critic = self.target_critic.load(
             f'{path}/target_critic.msgpack',
             require_fp8_metadata=(
-                self.target_critic_precision in ('fp8_direct', 'fp8_resident')
+                self.target_critic_precision in (
+                    'fp8_direct', 'fp8_resident', 'fp8_lag'
+                )
             ),
         )
         self.actor = self.actor.load(f'{path}/actor.msgpack')

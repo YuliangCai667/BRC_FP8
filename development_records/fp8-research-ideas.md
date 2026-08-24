@@ -246,8 +246,8 @@ Decision note, 2026-08-24: do not modify the bootstrap rule in the first interve
 
 ### Candidate F: lag-coded target state
 
-Status: `supported` by the 50k and Kahan-controlled 30k open-loop screens;
-closed-loop training remains pending.
+Status: `testing`; supported by the 50k and Kahan-controlled 30k open-loop
+screens, with the first closed-loop D-lag implementation smoke-validated.
 
 Do not store the target as an absolute copy of a relatively large weight. Store its lag relative to the online Critic:
 
@@ -270,6 +270,19 @@ amax FP32 scale. The recurrence consumes the exact same consecutive
 borrowed from the healthy FP32 teacher only when a diagnostic forward is built.
 There is no FP32 target master in the lag shadow, and the temporary reconstructed
 FP32 kernel is never saved.
+
+Accepted first closed-loop definition: `target_critic_precision=fp8_lag`
+keeps the online Critic parameters and Adam state FP32 while its GEMMs use the
+existing `fp8_direct` path. The target's four residual-kernel leaves persist
+E4M3 lag codes rather than absolute target weights; each learner update consumes
+the exact pre/post-update online kernels and writes
+`(1-tau)*(lag-online_delta)` back with an ensemble-specific current-amax scale.
+All target forward consumers reconstruct through one shared entry. Only the
+training bootstrap advances target input/kernel delayed-scaling metadata;
+diagnostics, time-limit queries, and evaluation are read-only. The first
+width-512 closed-loop smoke completed 203 learner updates without NaN/Inf.
+Formal Dogs seed-42 D-lag is the next decision gate; no closed-loop learning
+claim is made from the smoke.
 
 ### Diagnostic and intermediate controls
 
