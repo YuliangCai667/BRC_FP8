@@ -29,7 +29,11 @@
 | 2026-08-24 | `dogs_s42_step100k_kahan_smoke100` | 完成 | `EXP-FP8-TARGET-KAHAN-SMOKE`：Kahan 双 E4M3 buffer 的 checkpoint 验收 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `50814df` + Kahan 未提交实现 | 100 updates / 2 诊断点；所有状态与指标有限，无 NaN/Inf |
 | 2026-08-24 | `dogs_s42_step100k_kahan_lag_30k` | 完成 | `EXP-FP8-TARGET-KAHAN-OFFLINE-30K`：FP8 Kahan-momentum 与 lag-coded 同轨迹比较 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `50814df` + Kahan 未提交实现 | 30k / 60 点，无 NaN/Inf；Kahan state error `0.25858`，lag `0.00773` |
 | 2026-08-24 16:32 | `brc_cheetah_run_target_fp8_lag_s0_smoke` | 完成 | `EXP-FP8-TARGET-LAG-SMOKE`：lag-coded target 闭环短跑 | 0 / GPU 1 | `2091e7e` + lag 未提交实现 | 200 steps / 203 updates；NaN/Inf `0/0`；498 条 tensor stats；HLO 与数值验收通过 |
-| 2026-08-24 16:47 | `brc_dmc_dogs_target_fp8_lag_s42` / `nu2d5b90` | 运行中 | `EXP-FP8-TARGET-LAG-S42`：在线 FP8 Direct、目标 lag 常驻 FP8 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `1c135af`，clean | Dogs 500k；step 5k 首更有限、NaN/Inf `0/0`；不设 return 自动停止阈值 |
+| 2026-08-24 16:47 | `brc_dmc_dogs_target_fp8_lag_s42` / `nu2d5b90` | 完成 | `EXP-FP8-TARGET-LAG-S42`：在线 FP8 Direct、目标 lag 常驻 FP8 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `1c135af`，clean | 500k 最终 / 最佳 / 末 3 次平均 return `806.10 / 806.73 / 799.81`；`run_finished` |
+| 2026-09-01 11:09 | `brc_dmc_dogs_online_fp8_resident_s42-20260901-110927` / `fm76bnld` | 主动停止 | `EXP-FP8-ONLINE-RESIDENT-DIAG-S42-A`：online residual kernel E4M3 常驻机制诊断 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `124de8a` + 未提交实现 | 停止于 env step 276144；275k eval `374.51`；critic pnorm 已增至约 6.9k，明显高于匹配 control |
+| 2026-09-01 15:18 | `brc_dmc_dogs_online_fp8_resident_s42-20260901-151810` / `vv3x4xuh` | 完成 | `EXP-FP8-ONLINE-RESIDENT-DIAG-S42-B`：增加 optimizer/quantization-error 径向 cosine 后从头重跑 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `124de8a` + 未提交实现 | 500k 最终 / 最佳 / 末 3 次平均 return `505.98 / 530.14 / 512.29`；critic pnorm `11428.8`，诊断为 scale-dominated norm runaway |
+| 2026-09-02 05:19 | `brc_dmc_dogs_online_fp8_resident_s42-20260902-051913` / `ozhbrc8v` | 完成 | `EXP-FP8-ONLINE-RESIDENT-MECH-S42`：angular/norm/decay/scale-code 机制诊断增强 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `124de8a` + 未提交诊断实现 | 500k 最终 / 最佳 / 末 3 次 `667.78 / 667.78 / 625.50`；pnorm `9641.4`；NaN/Inf `0/0` |
+| 2026-09-02 05:23 | `brc_dmc_dogs_online_fp8_resident_s1-20260902-052342` / `zymfcugz` | 完成 | `EXP-FP8-ONLINE-RESIDENT-MECH-S1`：同协议第二种子 | 1 / GPU 0 | `codex/blackwell-fp8-direct` @ `124de8a` + 同一未提交诊断实现 | 500k 最终 / 最佳 / 末 3 次 `564.03 / 564.03 / 534.04`；pnorm `19714.7`；NaN/Inf `0/0` |
 
 ## 已完成：原始 BRC 三种子基线
 
@@ -498,11 +502,13 @@ env -u LD_LIBRARY_PATH CUDA_ROOT=/usr/local/cuda-12.8 CUDA_HOME=/usr/local/cuda-
 
 ### `EXP-FP8-TARGET-LAG-S42`
 
-- 状态：运行中；2026-08-24 16:47:19 Asia/Shanghai 从干净提交 `1c135af` 在 GPU1 的独立 tmux 中从头启动，无 checkpoint 转换。
+- 状态：完成；2026-08-24 16:47:19 Asia/Shanghai 从干净提交 `1c135af` 在 GPU1 的独立 tmux 中从头启动，2026-08-24 运行至 500k 并写入 `run_finished`。
 - 目的：首轮闭环可行性。比较 B `816.37`、target-forward `757.81` 与 naive resident D-R1 的 125k `7.23`；单 seed 不作统计显著性或吞吐结论。
 - 协议：Dogs seed 42、500k、start 5k、replay 1M、batch 1024、2 updates/step、width 4096、paper alignment、reward-mean bootstrap、25k eval/tensor stats、50k analysis、100k recovery。在线 `fp8_direct`，目标 `fp8_lag`。除 NaN/Inf 或运行故障外不提前停止。
 - 运行：tmux、run ID 与 W&B name 统一为 `brc_dmc_dogs_target_fp8_lag_s42`，PID `1599548`，物理 GPU1；[W&B `nu2d5b90`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/nu2d5b90)。
 - 启动验证：提交与远端均为 `1c135aff90d031eb785d55d320f8bdf2044dd56e`，metadata `git_status` 为空；CUDA root/home 与 `ptxas 12.8.61` 均来自 `/usr/local/cuda-12.8`。解析配置明确记录 online `fp8_direct`、target `fp8_lag`、E4M3 lag 常驻、FP32 online+lag 重建、无 derived cache。step 5,000 首更完成：critic loss `23.401`、critic grad norm `19.977`、actor loss `26.865`、actor grad norm `22.586`，NaN/Inf `0/0`。
+- 结果：20 次定期 eval 均完整；500k 最终 return `806.0978`，最佳 `806.7286`，末 3 次平均 `799.8090`，125k 为 `422.0946`。终点 checkpoint 和 recovery checkpoint 完整。单 seed 不建立统计等价，但相对 naive resident D-R1 的 125k `7.23` 已恢复学习，并与 B 最终 `816.37` 同量级。
+- 解释：lag-coded 修复了 target 绝对权重存储的时间分辨率问题；它仍依赖 FP32 online anchor，因此不能被当作 online/full-chain 解法。
 
 ```bash
 tmux new-session -d -s brc_dmc_dogs_target_fp8_lag_s42 \
@@ -531,6 +537,85 @@ tmux new-session -d -s brc_dmc_dogs_target_fp8_lag_s42 \
       --keep_last_recovery_checkpoints=1 --save_replay_buffer=true
   "'
 ```
+
+## 运行中：Online Critic E4M3 常驻诊断
+
+### `EXP-FP8-ONLINE-RESIDENT-DIAG-S42-A/B`
+
+- 状态：A 于 2026-09-01 11:09 Asia/Shanghai 在 GPU1 启动，按用户要求于 15:15 主动停止；事件流终止于 env step 276144 / update 542289，并写入 `run_interrupted` 与 `run_finished`。B 于 15:18 从头启动并于 2026-09-01 22:41:54 Asia/Shanghai 正常完成 500k / update 990003；最终 checkpoint 和 `run_finished` 完整。
+- 目的 / Idea：Idea 002；隔离 online Critic 的 E4M3 权重写回，判别 update resolution、scale coupling、Q-function sensitivity 和 bootstrap feedback。
+- 拟定范围：四个 online residual-Dense kernel 常驻 E4M3 并直接作为 FP8 GEMM RHS；无 FP32 weight master；Adam moments、target 参数/EMA、其余 Critic leaves、Actor 保持 FP32，target residual GEMM 使用 `fp8_direct`。
+- 比较：主控制是已完成的 `EXP-FP8-TARGET-FWD-S42`（online/target 均 `fp8_direct`，target 存储/EMA FP32，最终 `757.81`）；新臂只把 online 改为 `fp8_resident`。B（online `fp8_direct` + 全 FP32 target，`816.37`）是次要上限对照。`target_critic_precision=fp8_resident/fp8_lag` 均关闭。
+- 诊断：在现有 25k tensor-stat 间隔的最后一次真实更新上，记录 intended L2、applied/intended L2、cosine、swallowed/code-unchanged fraction、weight-relative error、scale log2 ratio 和 fixed-old-scale 反事实；同 batch 只返回 candidate 对 resident write 的 expected-Q、JS 与 loss 标量误差。不重复记录 raw codes 或完整更新张量。B 额外记录 `intended_update_radial_cosine`（旧物理权重与 optimizer intended update）和 `quantization_error_radial_cosine`（candidate 与 resident write error），用于把范数增长归因到 optimizer 子步骤或 FP8 投影子步骤。
+- 正式协议：Dogs seed 42、width 4096、500k、batch 1024、2 updates/step、25k eval/tensor stats；dynamic per-tensor current-amax scale。GPU 由用户运行时选择，除非 NaN/Inf 或运行故障，不设 return 自动停止阈值。
+- A 证据：run `brc_dmc_dogs_online_fp8_resident_s42-20260901-110927` / W&B `fm76bnld`；275k eval return `374.5096`，最后周期 train metric（276k）critic pnorm `6898.855`，无 update NaN/Inf。四个 resident kernel 在 250k 贡献 critic 范数平方的 98.4%；单步写回 expected-Q error 很小，因此该结果支持长期 resident 状态漂移，但尚未证明 bootstrap 因果机制。
+- B 运行：run `brc_dmc_dogs_online_fp8_resident_s42-20260901-151810` / [W&B `vv3x4xuh`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/vv3x4xuh)；GPU1，tmux `brc_fp8_radial_s42`，PID 启动时为 `3895504`。命令为 `scripts/run_dogs_online_fp8_resident.sh 1 42`；工作树为 `codex/blackwell-fp8-direct` @ `124de8a` 加未提交实现。按用户明确要求，新增指标后未做 smoke、测试或额外校验，直接启动正式实验。
+- B 结果：最终 / 最佳 / 末 3 次平均 eval return 为 `505.9815 / 530.1448 / 512.2925`，匹配 target-forward-only control 为 `757.8079 / 786.6346 / 774.9461`；四任务最终 return 均更低。最终 critic pnorm `11428.8`，control 为 `2712.0`；四个 resident kernels 占 critic 范数平方 `99.0%`，无 update NaN/Inf。A/B 在 25k–275k 的 pnorm 和 eval 轨迹近似复现，排除单次偶然曲线。
+- 机制诊断：160 个稀疏 layer-member 样本中，optimizer radial cosine 均值 `+0.00392`、按 intended-L2 加权 `+0.00131`、正号率 `52.5%`，不支持稳定 optimizer 径向外推；quantization-error radial cosine 均值 `+0.0833`、正号率 `51.9%`，单点正负幅度很大，不能仅凭 unweighted cosine 宣称单向偏置。原有 applied/intended L2 均值 `1.00002`、update cosine `0.999991`；swallowed fraction 从前 100k 平均 `0.052%` 增至 400k 后 `0.731%`，不是主失败机制。expected-Q MAE 均值 `8.10e-6`、JS 约 `9.89e-9`、loss relative error `1.62e-7`，排除单步 Q 敏感性。
+- Scale 证据：25k→500k，最大 kernel scale 从 `8.22e-4` 增至 `2.98e-2`；四个 runaway member 的典型 scale 倍率为 `16.4x/36.2x/16.8x/22.8x`。其中三个主要 runaway member 的 25k→500k code cosine 为 `0.9998/1.0000/1.0000`，code norm 几乎不变，而物理 norm 与 scale 同比例增长；最极端 `Block0/Dense1/ensemble1` 的 physical norm `264.2→9573.8`。这支持 LayerNorm 尺度自由度上的 smooth scale-dominated runaway，而非 code-space 爆炸或突发 scale jump。稀疏径向样本不足以断言每步 FP8 projection 都有正偏，bootstrap amplification 仍未被因果证明。
+- 实现记录：[2026-08-28-online-fp8-resident-critic.md](2026-08-28-online-fp8-resident-critic.md)；各 run 已按启动时的实际 commit/dirty state 记录，不能用后来发布的分支提交替代其 provenance。
+- 后续因果门：若闭环失败但单步权重→Q 误差小，再设计匹配的 FP32 teacher-target open-loop 对照；不仅凭时序相关宣称 bootstrap amplification。
+
+### `EXP-FP8-ONLINE-RESIDENT-MECH-S42/S1`
+
+- 状态：2026-09-02 05:19:13 Asia/Shanghai 在 GPU1、tmux
+  `brc_fp8_mechanism_s42` 启动；run
+  `brc_dmc_dogs_online_fp8_resident_s42-20260902-051913`，W&B
+  `ozhbrc8v`。
+- 代码：`codex/blackwell-fp8-direct` @ `124de8a9e916` 加未提交诊断实现；
+  算法、quantizer、optimizer 和正式超参数不变。
+- 配置：复用上一轮 Dogs resident seed42/width4096/batch1024/2 updates
+  /500k/25k eval+tensor-stat 协议；online `fp8_resident`，target 参数与 EMA
+  FP32 常驻、target residual forward 为 `fp8_direct`，actor 与 optimizer state
+  FP32。
+- 启动验收：W&B 和模型初始化完成，step 5000 首次真实 update 完成；critic
+  loss/gnorm/pnorm `7.79685 / 17.9412 / 328.690`，训练 NaN/Inf `0/0`。
+- 启动命令：`scripts/run_dogs_online_fp8_resident.sh 1 42`。
+- 第二种子：2026-09-02 05:23:42 在 GPU0、tmux
+  `brc_fp8_mechanism_s1_gpu0` 启动；run
+  `brc_dmc_dogs_online_fp8_resident_s1-20260902-052342`，W&B
+  `zymfcugz`。step 5000 首次 update 正常完成，critic
+  loss/gnorm/pnorm `5.27780 / 12.4531 / 328.688`，NaN/Inf `0/0`。启动命令
+  为 `scripts/run_dogs_online_fp8_resident.sh 0 1`。
+- 完成：两者均在 2026-09-02 12:05 Asia/Shanghai 正常写入 500k、
+  update 990003、20 次 eval、20 次 tensor stats、最终 analysis/recovery
+  checkpoint 和 `run_finished`。seed42 最终 / 最佳 / 末 3 次 return 为
+  `667.78 / 667.78 / 625.50`，seed1 为
+  `564.03 / 564.03 / 534.04`；最终 pnorm 分别为
+  `9641.4 / 19714.7`，所有训练 NaN/Inf 为 `0/0`。
+- Angular：resident-kernel 全局 intended angular step 从 25k 到 500k
+  分别下降 `19.9x / 33.4x`，而实际/intended angular retention 的全样本
+  中位数为 `1.0000005 / 1.0000019`，95% 绝对偏差仅
+  `4.31e-5 / 7.38e-5`。seed42 tangential L2 `0.171→0.186`，下降几乎全由
+  norm 分母造成；seed1 tangential L2 `0.195→0.136`，但 norm
+  `847.5→19675.7` 仍是主要因素。
+- Norm 分解：25k→500k resident norm-square 增量要求平均每次 update 增加
+  `96.2 / 406.8`；稀疏诊断中的二阶项平均仅 `0.0404 / 0.0365`，量级相差
+  `2.4e3x / 1.1e4x`，排除二阶切向累积为主因。诊断时点的一阶项并非
+  持续为正，因此现有 25k 采样只能说明长期增长必由未采样时刻累计的一阶
+  径向事件承担，不能声称每一步都有固定 outward bias。
+- Decay：按 intended radial 加权，FP8 write 后 decay retention 为
+  `0.829 / 0.937`，说明有轻度削弱但单点值受同量级量化 residual 干扰。
+  原 AdamW `lr*wd=3e-8/update` 即使完全保留，990k updates 也只提供约
+  `2.93%` 累计收缩，故 decay 削弱不可能解释 `21.7x / 23.2x` norm 增长。
+- Code/scale：25k→500k，runaway member 的 scale 增长最高
+  `39.9x / 71.5x`；除 seed42 一个 member 的 code L2 降至 `0.898x` 外，
+  code L2 基本保持在 `0.99x–1.01x`。code unchanged fraction 从
+  `0.628→0.870 / 0.640→0.991`，但 sampled write 的 angular retention
+  仍近 1；因此是长期 scale-dominated gauge drift 与 effective angular
+  step collapse，不是单步 directional write failure。单步 aggregate
+  expected-Q MAE 均值仅 `6.50e-6 / 1.07e-5`。
+- 数值说明：直接做两个大 FP32 norm-square 的差在后期出现 cancellation，
+  部分 member 记录为零；误差仍位于估计的 FP32 cancellation bound 内。
+  机制判断使用稳定的 `2<W,delta>+||delta||^2` 分解，而不使用后期 direct
+  difference 的相对误差。
+- 对照与限制：匹配 seed42 FP8-direct/FP32-weight control 的最终 / 最佳 /
+  末 3 次为 `757.81 / 786.63 / 774.95`，pnorm `2712.0`；本轮 seed42
+  仍较差。seed1 没有匹配 control，因此两个 treatment seed 不能形成两种子
+  paired quality estimate。上一轮相同 seed42/config 的 resident run 最终
+  `505.98`，而本轮 `667.78`；source snapshot 除诊断代码外一致，说明长期
+  return 对 GPU 数值/轨迹扰动敏感，但 norm/scale/angular 机制跨三次 run
+  保持复现。
 
 ## 更新规则
 

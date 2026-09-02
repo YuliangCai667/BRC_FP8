@@ -376,9 +376,17 @@ This narrative is conditional on stages 2 and 3 actually demonstrating the mecha
 
 ## Idea 002: Resident Low-Precision Critic Weights
 
-Status: `rejected` for naive per-step E4M3 target storage; corrected representations remain `hypothesis`
+Status: `supported` for lag-coded target state; naive target storage `rejected`; naive online resident weights `rejected`, LayerNorm scale-gauge instability `diagnosed`
 
-Updated: 2026-08-24. The first resident-state implementation is limited to the target Critic residual core. It consumes stored E4M3 kernels directly in target forward GEMMs while input/output projections, LayerNorm, biases, task embeddings, and all online learning state retain their selected existing precision. Formal C/D runs decisively rejected naive per-step requantized EMA: arithmetic remained finite, but target tracking and return stagnated. Resident low-precision storage remains an active direction only with an explicit temporal-update mechanism such as Idea 001.
+Updated: 2026-09-02. The first resident-state implementation was limited to the target Critic residual core. It consumes stored E4M3 kernels directly in target forward GEMMs while input/output projections, LayerNorm, biases, task embeddings, and all online learning state retain their selected existing precision. Formal C/D runs decisively rejected naive per-step requantized EMA: arithmetic remained finite, but target tracking and return stagnated. Lag-coded target state subsequently completed the Dogs seed-42 closed loop with final return `806.10`, supporting the representation correction for the target update. The completed online-resident Dogs run reached final return `505.98` versus `757.81` for the matched target-forward-only control, while critic pnorm reached `11428.8` versus `2712.0`. The four resident kernels contributed 99.0% of squared critic norm. The failure reproduced the stopped precursor run through 275k. Sparse optimizer/quantization radial cosines do not show a stable outward direction, and update retention plus one-step expected-Q fidelity remain high. Checkpoint evidence instead shows that several resident matrices preserve nearly the same FP8 code direction and code norm while their FP32 scale and physical norm grow by `16x–36x`. The supported mechanism is therefore smooth scale-dominated drift along the scale freedom created by the immediately following LayerNorms; whether RL bootstrapping amplifies the resulting trajectory divergence remains unproven.
+
+Accepted scope definition: full persistent-state FP8 applies to large,
+long-lived payloads such as online/target matrix state and later optimizer
+state. FP32 per-tensor/per-block scales, amax histories, counters, and other
+small quantization metadata are allowed, as are FP32/BF16 reductions,
+normalization, softmax, and accumulation. A same-size FP32 weight master,
+shadow, or residual is forbidden. State-byte reporting must separate FP8
+payload from high-precision metadata and report the metadata fraction.
 
 ### Motivation
 
@@ -427,6 +435,77 @@ The online Critic is harder:
 4. **Persistent online BF16.** Test whether Adam updates survive when parameters are written to BF16 while moment states remain FP32.
 5. **Persistent online FP8.** Attempt only after measuring optimizer update-to-lattice ratios and selecting an explicit update strategy. Do not silently retain an FP32 master while calling this full-chain FP8 storage.
 
+### 2026-08-28 online-resident diagnostic phase
+
+Research question: with the existing native FP8 GEMMs unchanged, can the four online residual-Dense kernels persist in E4M3 and absorb AdamW updates without an FP32 weight master, while target parameters/EMA and Adam moments remain FP32 controls?
+
+The first baseline intentionally adds no correction mechanism. For each resident kernel, the optimizer forms the intended post-Adam candidate transiently in FP32 from the dequantized current weight, then immediately requantizes it to E4M3. The transient candidate is permitted as update arithmetic but is not a persistent master. Target storage and EMA remain FP32, while target residual GEMMs retain the already validated `fp8_direct` compute path; Actor, non-residual Critic leaves, and optimizer moments also remain FP32 in this phase. This isolates the online parameter write while keeping both online and target residual GEMMs FP8; it is not yet a full-chain claim.
+
+Falsifiable hypothesis: naive online E4M3 residency causes a material learning deficit relative to the existing online `fp8_direct` control, and the deficit can be assigned to at least one measured mechanism rather than merely to non-finite arithmetic. Failure is not assumed in advance.
+
+The diagnostic must distinguish:
+
+1. **Update-resolution loss.** Measure intended and applied update norms, cosine/projection, sign agreement, coordinate-wise swallowed fraction, and code-change fraction. High swallowed/projection loss with preserved direction supports a lattice-resolution diagnosis.
+2. **Scale coupling.** Measure `log2(new_scale/old_scale)`, scale turnover, code churn among coordinates with negligible intended updates, and a same-candidate old-scale counterfactual. Correlated global churn or dequantized movement during scale jumps supports per-tensor scale coupling; raw code churn alone is insufficient.
+3. **Weight-to-function sensitivity.** On the same diagnostic batch, compare the ephemeral FP32 post-Adam candidate with its resident E4M3 write using logits, expected-Q MAE/signed bias, 101-bin JS divergence, and critic loss. Small weight error with large functional error supports Q-function sensitivity.
+4. **Bootstrap feedback.** A growing correlation between one-step error and later return is only suggestive. A causal claim requires a matched open-loop/teacher-target control against the normal closed loop: stability with fixed FP32 teacher targets but failure when quantized errors feed the target/bootstrapping path supports RL-specific amplification.
+
+The primary control for the first closed-loop run is the completed target-forward-only arm: online `fp8_direct` + target `fp8_direct`, with FP32 target storage/EMA. The new arm changes only online storage to `fp8_resident`; target remains `fp8_direct`. The online-FP8/fully-FP32-target B run remains a secondary ceiling rather than the isolating control. Lag-coded and resident target storage remain disabled. The established Dogs seed-42, width-4,096 protocol is the proposed formal comparison; smoke length, diagnostic cadence, early-stop rule, and the later open-loop construction remain decision gates rather than frozen protocol.
+
+Implementation warning: the existing `ResidentFp8Dense` cannot simply be enabled for the online Critic under the generic `Model.apply_gradient`. Its parameter is an FP8 code tensor with a separate scale; AdamW must update the physical dequantized weight and explicitly write new codes/scale. Treating codes as ordinary parameters would optimize in code space, may promote the stored dtype, and would not define the intended resident-weight algorithm.
+
+Implementation status on 2026-09-01: the naive per-tensor baseline and sampled
+real-update diagnostics are implemented in the working tree. The physical FP32
+tree and post-Adam candidate exist only inside one compiled update; neither is
+returned as persistent model state nor checkpointed. Diagnostics return scalar
+summaries only. The current retry additionally records optimizer-update radial
+cosine against the old physical weight and quantization-error radial cosine
+against the pre-write candidate. Earlier CPU validation is recorded in
+[2026-08-28-online-fp8-resident-critic.md](2026-08-28-online-fp8-resident-critic.md);
+the radial-cosine addition was launched without smoke or extra validation at the
+user's explicit request. GPU runs and IDs are recorded in
+[experiment-runs.md](experiment-runs.md).
+
+The 2026-09-02 diagnostic-only extension adds exact intended/actual angular
+motion, first-/second-order norm-growth decomposition, the installed-Optax
+AdamW adaptive/decay split, and an exact scale-then-code write decomposition.
+It is designed to distinguish norm-denominator effects, FP8 directional-motion
+loss, second-order tangential accumulation, decay attenuation, and long-run
+scale domination without introducing an intervention. Definitions, validation,
+and the smoke record are in
+[2026-08-28-online-fp8-resident-critic.md](2026-08-28-online-fp8-resident-critic.md).
+
+The two enhanced Dogs runs (`EXP-FP8-ONLINE-RESIDENT-MECH-S42/S1`) completed
+500k. Their resident norms grew `21.7x/23.2x` from 25k to 500k and intended
+effective angular steps fell `19.9x/33.4x`. Actual/intended angular retention
+remained within roughly `1e-4` of one, so the failure is not loss of intended
+direction at the FP8 write. The always-positive second-order update-squared
+term is three to four orders of magnitude too small to account for observed
+norm-square growth. AdamW decay retention is mildly reduced (`0.829/0.937`
+when weighted by intended radial shrinkage), but full decay would itself shrink
+only about 2.93% over the run. Code freezing and scale domination reproduce:
+late code-unchanged fractions reach `0.870/0.991`, code L2 is nearly fixed,
+and runaway scales grow as much as `39.9x/71.5x`. The supported mechanism is
+therefore scale-gauge norm runaway causing intended angular-step collapse;
+the exact origin of the accumulated first-order radial drift remains unresolved
+because diagnostics sample only one update every 25k env steps.
+
+### Candidate intervention after the online-resident diagnosis
+
+The leading candidate is a LayerNorm-aware, norm-canonicalized resident write:
+after the transient Adam candidate is formed, remove the redundant global gain
+by restoring each resident layer/member to a fixed reference Frobenius norm,
+then quantize the normalized direction. The reference is one FP32 scalar per
+layer/member, not a full-size master or residual. This directly prevents the
+observed scale-only runaway while preserving the function approximately because
+each covered Dense is immediately followed by LayerNorm. It remains a candidate,
+not an accepted method. Removing only the optimizer update's radial component is
+lower priority because the measured optimizer radial cosine is centered near
+zero; frozen scale risks clipping, and per-block scaling alone does not remove
+the same gauge freedom. The next decision gate is a matched baseline versus
+norm-canonicalized write, optionally followed by tangent-update projection if
+norm anchoring alone is insufficient.
+
 ### Required measurements
 
 - time and bytes attributable to kernel `amax`, cast, GEMM, optimizer, and Polyak update;
@@ -446,3 +525,5 @@ This idea separates three increasingly difficult claims:
 3. **FP8 learning state:** parameters themselves persist in FP8 and must absorb EMA/optimizer updates.
 
 The separation prevents a speed optimization from being confused with a numerical-stability contribution. Idea 001 addresses the target-state transition in stage 3; a later optimizer idea must address the online-state transition.
+
+Under the revised direction, the conditional paper story is: different persistent RL states fail for different temporal reasons. Slow target EMA needs a lag-relative representation; online Adam writes may instead require update-residual, scale-decoupled, or function-aware handling; optimizer moments are a subsequent state class. This becomes an RL training-state framework only if the staged evidence shows distinct failure mechanisms and the combined system trains stably. Merely assembling known quantizers remains insufficient.

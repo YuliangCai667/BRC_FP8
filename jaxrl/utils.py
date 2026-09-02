@@ -39,6 +39,9 @@ class Model:
     apply_fn: flax.linen.Module = flax.struct.field(pytree_node=False)
     params: Params
     tx: Optional[optax.GradientTransformation] = flax.struct.field(pytree_node=False)
+    reference_apply_fn: Optional[flax.linen.Module] = flax.struct.field(
+        pytree_node=False, default=None
+    )
     opt_state: Optional[optax.OptState] = None
     fp8_meta: Optional[Params] = None
 
@@ -46,7 +49,8 @@ class Model:
     def create(cls,
                model_def: flax.linen.Module,
                inputs: Sequence[jnp.ndarray],
-               tx: Optional[optax.GradientTransformation] = None):
+               tx: Optional[optax.GradientTransformation] = None,
+               reference_apply_fn: Optional[flax.linen.Module] = None):
         variables = model_def.init(*inputs)
 
         params = variables['params']
@@ -59,6 +63,7 @@ class Model:
 
         return cls(step=1,
                    apply_fn=model_def,
+                   reference_apply_fn=reference_apply_fn,
                    params=params,
                    tx=tx,
                    opt_state=opt_state,

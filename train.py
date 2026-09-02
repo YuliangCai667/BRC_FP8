@@ -42,7 +42,7 @@ flags.DEFINE_boolean('render', True, 'Whether to log evaluation videos.')
 flags.DEFINE_integer('updates_per_step', 2, 'Number of updates per environment step.')
 flags.DEFINE_integer('width_critic', 4096, 'Width of the critic network.')
 flags.DEFINE_enum(
-    'critic_precision', 'fp32', ['fp32', 'fp8_direct'],
+    'critic_precision', 'fp32', ['fp32', 'fp8_direct', 'fp8_resident'],
     'Precision used by the online critic residual-block Dense layers.',
 )
 flags.DEFINE_enum(
@@ -176,6 +176,38 @@ def main(_):
     )
     config = FLAGS.flag_values_dict()
     config.update({f'resolved_{key}': value for key, value in resolved_alignment.items()})
+    config.update({
+        'resolved_online_fp8_compute_scope': (
+            'residual_dense_kernels'
+            if FLAGS.critic_precision in ('fp8_direct', 'fp8_resident')
+            else 'none'
+        ),
+        'resolved_online_fp8_storage_scope': (
+            'residual_dense_kernels'
+            if FLAGS.critic_precision == 'fp8_resident'
+            else 'none'
+        ),
+        'resolved_online_parameter_storage': (
+            'e4m3_residual_dense_kernels_otherwise_fp32'
+            if FLAGS.critic_precision == 'fp8_resident'
+            else 'fp32_all_parameters'
+        ),
+        'resolved_online_fp8_weight_scaling': (
+            'dynamic_current_amax_per_tensor'
+            if FLAGS.critic_precision == 'fp8_resident'
+            else (
+                'delayed_amax_history_per_tensor'
+                if FLAGS.critic_precision == 'fp8_direct'
+                else 'none'
+            )
+        ),
+        'resolved_online_fp32_weight_master': (
+            'none'
+            if FLAGS.critic_precision == 'fp8_resident'
+            else 'persistent_fp32_parameters'
+        ),
+        'resolved_online_optimizer_state': 'fp32_adamw',
+    })
     target_fp8_compute = FLAGS.target_critic_precision in (
         'fp8_direct', 'fp8_resident', 'fp8_lag'
     )
@@ -464,9 +496,12 @@ def main(_):
                     batches,
                     FLAGS.updates_per_step,
                     i,
-                    collect_target_ema_diagnostics=(
-                        FLAGS.target_critic_precision in (
-                            'fp8_resident', 'fp8_lag'
+                    collect_update_diagnostics=(
+                        (
+                            FLAGS.critic_precision == 'fp8_resident'
+                            or FLAGS.target_critic_precision in (
+                                'fp8_resident', 'fp8_lag'
+                            )
                         )
                         and FLAGS.tensor_stats_interval > 0
                         and i % FLAGS.tensor_stats_interval == 0
@@ -513,6 +548,9 @@ def main(_):
                     'action_std': float(np.std(actions)),
                     'action_saturation_fraction': float(np.mean(np.abs(actions) >= 0.99)),
                     'fp8_direct_enabled': float(FLAGS.critic_precision == 'fp8_direct'),
+                    'fp8_resident_enabled': float(
+                        FLAGS.critic_precision == 'fp8_resident'
+                    ),
                     'target_fp8_direct_enabled': float(
                         FLAGS.target_critic_precision == 'fp8_direct'
                     ),

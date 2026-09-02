@@ -3,12 +3,18 @@ import unittest
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import flax
+import optax
 from flax import traverse_util
 
 from jaxrl.agent.brc_learner import BRC
 from jaxrl.agent.update import (
+    _optimizer_update_components,
+    _scale_code_update_components,
+    _update_geometry,
+    dequantize_critic_params,
     dequantize_target_params,
     reconstruct_target_params,
     target_ema_diagnostics,
@@ -55,6 +61,102 @@ def assert_trees_equal(test, left, right):
 
 
 class Fp8CriticTest(unittest.TestCase):
+    def test_update_geometry_matches_projection_and_norm_identity(self):
+        weight = jnp.asarray([[3.0, 4.0], [-2.0, 1.0]], dtype=jnp.float32)
+        update = jnp.asarray([[0.2, -0.1], [0.4, 0.3]], dtype=jnp.float32)
+        geometry = _update_geometry(weight, update)
+
+        weight_np = np.asarray(weight)
+        update_np = np.asarray(update)
+        weight_norm_sq = np.vdot(weight_np, weight_np)
+        radial = (
+            np.vdot(weight_np, update_np) / weight_norm_sq
+        ) * weight_np
+        tangential = update_np - radial
+        expected_change = (
+            np.vdot(weight_np + update_np, weight_np + update_np)
+            - weight_norm_sq
+        )
+
+        np.testing.assert_allclose(
+            geometry['tangential_update_l2'],
+            np.linalg.norm(tangential),
+            rtol=1e-6,
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(
+            geometry['effective_angular_step'],
+            np.linalg.norm(tangential) / np.linalg.norm(weight_np),
+            rtol=1e-6,
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(
+            geometry['predicted_norm_sq_change'],
+            expected_change,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            geometry['actual_norm_sq_change'],
+            expected_change,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+    def test_optimizer_weight_decay_split_matches_adamw_order(self):
+        params = {
+            'w': jnp.asarray([[1.5, -2.0], [0.5, 3.0]], dtype=jnp.float32)
+        }
+        grads = {
+            'w': jnp.asarray([[0.4, -0.2], [0.1, 0.3]], dtype=jnp.float32)
+        }
+        learning_rate = 3e-4
+        weight_decay = 1e-4
+        tx = optax.adamw(
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+        )
+        opt_state = tx.init(params)
+        total, _, adaptive, decay = _optimizer_update_components(
+            tx, grads, opt_state, params, True
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(total['w']),
+            np.asarray(adaptive['w'] + decay['w']),
+            rtol=1e-7,
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            np.asarray(decay['w']),
+            -learning_rate * weight_decay * np.asarray(params['w']),
+            rtol=2e-3,
+            atol=2e-10,
+        )
+
+    def test_scale_code_decomposition_is_exact(self):
+        old_codes = jnp.asarray(
+            [[1.0, -2.0], [3.0, 0.5]], dtype=jnp.float8_e4m3fn
+        )
+        next_codes = jnp.asarray(
+            [[1.25, -1.75], [2.5, 0.625]], dtype=jnp.float8_e4m3fn
+        )
+        old_scale = jnp.float32(0.2)
+        next_scale = jnp.float32(0.35)
+        scale_only, code_only = _scale_code_update_components(
+            old_codes, old_scale, next_codes, next_scale
+        )
+        actual = (
+            dequantize_e4m3(next_codes, next_scale)
+            - dequantize_e4m3(old_codes, old_scale)
+        )
+        np.testing.assert_allclose(
+            np.asarray(scale_only + code_only),
+            np.asarray(actual),
+            rtol=1e-7,
+            atol=1e-7,
+        )
+
     def test_lag_target_scope_initial_reconstruction_and_recurrence(self):
         agent = make_agent('fp8_direct', 'fp8_lag')
         raw_params = traverse_util.flatten_dict(
@@ -182,7 +284,7 @@ class Fp8CriticTest(unittest.TestCase):
         )
         info = agent.update(
             make_batch(), 1, env_step=1,
-            collect_target_ema_diagnostics=True,
+            collect_update_diagnostics=True,
         )
         jax.block_until_ready(info)
         updated_meta = traverse_util.flatten_dict(agent.target_critic.fp8_meta)
@@ -291,6 +393,205 @@ class Fp8CriticTest(unittest.TestCase):
         for leaf in jax.tree_util.tree_leaves(fp8.critic.opt_state):
             if np.issubdtype(leaf.dtype, np.floating):
                 self.assertEqual(leaf.dtype, np.dtype(np.float32))
+
+    def test_online_resident_scope_optimizer_and_target_initialization(self):
+        agent = make_agent('fp8_resident', 'fp8_direct')
+        params = traverse_util.flatten_dict(agent.critic.params, sep='/')
+        resident_paths = [
+            path for path, value in params.items()
+            if value.dtype == jax.numpy.float8_e4m3fn
+        ]
+        self.assertEqual(len(resident_paths), 4)
+        self.assertTrue(all(
+            '/BronetBlock_' in path and path.endswith('/kernel')
+            for path in resident_paths
+        ))
+        self.assertTrue(all(
+            value.dtype == np.dtype(np.float32)
+            for path, value in params.items()
+            if path not in resident_paths
+        ))
+        self.assertTrue(all(
+            leaf.dtype == np.dtype(np.float32)
+            for leaf in jax.tree_util.tree_leaves(agent.critic.opt_state)
+            if np.issubdtype(leaf.dtype, np.floating)
+        ))
+        self.assertTrue(all(
+            leaf.dtype == np.dtype(np.float32)
+            for leaf in jax.tree_util.tree_leaves(agent.target_critic.params)
+        ))
+        assert_trees_equal(
+            self,
+            dequantize_critic_params(agent.critic),
+            agent.target_critic.params,
+        )
+        metadata = traverse_util.flatten_dict(agent.critic.fp8_meta, sep='/')
+        self.assertEqual(
+            sum(path.endswith('/kernel_scale') for path in metadata), 4
+        )
+        self.assertFalse(any(path.endswith('_amax_history') for path in metadata))
+
+    def test_online_resident_update_and_nonredundant_diagnostics(self):
+        agent = make_agent('fp8_resident', 'fp8_direct')
+        batch = make_batch()
+        old_target = jax.tree.map(
+            lambda value: np.asarray(value).copy(), agent.target_critic.params
+        )
+        info = agent.update(
+            batch, 1, env_step=1, collect_update_diagnostics=True
+        )
+        jax.block_until_ready(info)
+
+        resident_paths = [
+            path for path, value in traverse_util.flatten_dict(
+                agent.critic.params, sep='/'
+            ).items()
+            if value.dtype == jax.numpy.float8_e4m3fn
+        ]
+        self.assertEqual(len(resident_paths), 4)
+        self.assertTrue(all(
+            leaf.dtype == np.dtype(np.float32)
+            for leaf in jax.tree_util.tree_leaves(agent.critic.opt_state)
+            if np.issubdtype(leaf.dtype, np.floating)
+        ))
+
+        physical = dequantize_critic_params(agent.critic)
+        for got, online, old in zip(
+            jax.tree_util.tree_leaves(agent.target_critic.params),
+            jax.tree_util.tree_leaves(physical),
+            jax.tree_util.tree_leaves(old_target),
+        ):
+            np.testing.assert_allclose(
+                np.asarray(got),
+                np.asarray(online) * 0.005 + old * 0.995,
+                rtol=1e-6,
+                atol=1e-6,
+            )
+
+        diagnostics = agent.last_online_resident_diagnostics
+        self.assertEqual(
+            set(diagnostics), {'parameter_write', 'function_write'}
+        )
+        self.assertEqual(len(diagnostics['parameter_write']), 8)
+        expected_parameter_metrics = {
+            'intended_update_l2',
+            'intended_update_radial_cosine',
+            'intended_tangential_update_l2',
+            'intended_effective_angular_step',
+            'actual_tangential_update_l2',
+            'actual_effective_angular_step',
+            'angular_retention',
+            'intended_first_order_radial',
+            'intended_second_order_update_sq',
+            'intended_predicted_norm_sq_change',
+            'intended_actual_norm_sq_change',
+            'actual_first_order_radial',
+            'actual_second_order_update_sq',
+            'actual_predicted_norm_sq_change',
+            'actual_norm_sq_change',
+            'wd_intended_l2',
+            'wd_intended_radial',
+            'wd_applied_radial',
+            'wd_radial_retention',
+            'applied_to_intended_l2_ratio',
+            'update_cosine',
+            'swallowed_update_fraction',
+            'code_unchanged_fraction',
+            'code_l2',
+            'code_cosine',
+            'weight_relative_error',
+            'quantization_error_radial_cosine',
+            'scale_log2_ratio',
+            'relative_scale_change',
+            'scale_only_update_l2',
+            'code_only_update_l2',
+            'scale_update_fraction_of_actual_l2',
+            'dynamic_vs_fixed_relative_difference',
+        }
+        self.assertTrue(all(
+            set(row) == expected_parameter_metrics
+            for row in diagnostics['parameter_write'].values()
+        ))
+        self.assertEqual(
+            set(diagnostics['function_write']),
+            {'aggregate', 'ensemble_0', 'ensemble_1'},
+        )
+        self.assertTrue(all(
+            np.isfinite(np.asarray(leaf)).all()
+            for leaf in jax.tree_util.tree_leaves(diagnostics)
+        ))
+        for row in diagnostics['parameter_write'].values():
+            np.testing.assert_allclose(
+                np.asarray(row['intended_predicted_norm_sq_change']),
+                np.asarray(row['intended_actual_norm_sq_change']),
+                rtol=5e-3,
+                atol=2e-5,
+            )
+            np.testing.assert_allclose(
+                np.asarray(row['actual_predicted_norm_sq_change']),
+                np.asarray(row['actual_norm_sq_change']),
+                rtol=5e-3,
+                atol=2e-5,
+            )
+
+        probe = Batch(*[value[0] for value in batch])
+        tensor_diagnostics = agent.get_tensor_diagnostics(probe)
+        jax.block_until_ready(tensor_diagnostics)
+        storage = tensor_diagnostics['fp8_online_storage']
+        self.assertEqual(
+            set(storage), {'kernel_scales', 'last_applied_update'}
+        )
+        self.assertNotIn('codes', storage)
+        self.assertTrue(all(
+            leaf.dtype == np.dtype(np.float32)
+            for leaf in jax.tree_util.tree_leaves(
+                tensor_diagnostics['params']['critic']
+            )
+        ))
+        self.assertTrue(all(
+            leaf.dtype == np.dtype(np.float32)
+            for leaf in jax.tree_util.tree_leaves(
+                tensor_diagnostics['gradients']['critic']
+            )
+        ))
+
+    def test_resident_diagnostics_do_not_change_update_trajectory(self):
+        without_diagnostics = make_agent('fp8_resident', 'fp8_direct')
+        with_diagnostics = make_agent('fp8_resident', 'fp8_direct')
+        batch = make_batch()
+
+        for env_step in range(1, 4):
+            info_without = without_diagnostics.update(
+                batch,
+                1,
+                env_step=env_step,
+                collect_update_diagnostics=False,
+            )
+            info_with = with_diagnostics.update(
+                batch,
+                1,
+                env_step=env_step,
+                collect_update_diagnostics=True,
+            )
+            jax.block_until_ready((info_without, info_with))
+
+        for name in (
+            'actor',
+            'critic',
+            'target_critic',
+            'temp',
+            'rng',
+            'normalizer_rng',
+            'task_entropies',
+            'task_entropy_counts',
+            'step',
+        ):
+            assert_trees_equal(
+                self,
+                getattr(without_diagnostics, name),
+                getattr(with_diagnostics, name),
+            )
+        assert_trees_equal(self, info_without, info_with)
 
     def test_critic_and_actor_paths_both_advance_fp8_history(self):
         agent = make_agent('fp8_direct')
@@ -433,7 +734,7 @@ class Fp8CriticTest(unittest.TestCase):
             batch,
             1,
             env_step=1,
-            collect_target_ema_diagnostics=True,
+            collect_update_diagnostics=True,
         )
         probe = Batch(*[value[0] for value in batch])
         full_diagnostics = agent.get_tensor_diagnostics(probe)
@@ -559,6 +860,63 @@ class Fp8CriticTest(unittest.TestCase):
             assert_trees_equal(self, source.critic.params, restored.critic.params)
             assert_trees_equal(self, source.critic.fp8_meta, restored.critic.fp8_meta)
 
+    def test_online_resident_checkpoint_round_trip_and_state_bytes(self):
+        source = make_agent('fp8_resident', 'fp8_direct')
+        batch = make_batch()
+        source.update(batch, 1, env_step=1)
+        with tempfile.TemporaryDirectory() as temp:
+            manager = CheckpointManager(
+                Path(temp) / 'checkpoints',
+                'online-resident-test',
+                Path(temp) / 'run',
+                ['task'],
+                {
+                    'critic_precision': 'fp8_resident',
+                    'target_critic_precision': 'fp8_direct',
+                },
+            )
+            checkpoint = manager.save_recovery(
+                source,
+                replay_buffer=type('Buffer', (), {
+                    'estimate_size_bytes': lambda self: 0,
+                    'save': lambda self, path: None,
+                })(),
+                reward_normalizer=type('Normalizer', (), {
+                    'state_dict': lambda self: {},
+                })(),
+                episode_recorder=type('Episodes', (), {
+                    'state_dict': lambda self: {},
+                })(),
+                env_step=1,
+                wandb_id=None,
+                save_replay_buffer=False,
+            )
+            manifest = CheckpointManager.read_manifest(checkpoint)
+            self.assertIn('float8_e4m3fn', manifest['parameter_dtypes'])
+            self.assertEqual(
+                set(manifest['optimizer_dtypes']), {'float32', 'int32'}
+            )
+            state_bytes = manifest['state_bytes']
+            self.assertGreater(state_bytes['fp8_payload'], 0)
+            self.assertGreater(state_bytes['fp8_metadata'], 0)
+            self.assertAlmostEqual(
+                state_bytes['fp8_metadata_fraction'],
+                state_bytes['fp8_metadata'] / state_bytes['persistent_total'],
+            )
+
+            source.save(temp, include_optimizer=True)
+            restored = make_agent('fp8_resident', 'fp8_direct')
+            restored.load(temp)
+            assert_trees_equal(self, source.critic.params, restored.critic.params)
+            assert_trees_equal(self, source.critic.fp8_meta, restored.critic.fp8_meta)
+            assert_trees_equal(self, source.critic.opt_state, restored.critic.opt_state)
+            source_info = source.update(batch, 1, env_step=2)
+            restored_info = restored.update(batch, 1, env_step=2)
+            jax.block_until_ready((source_info, restored_info))
+            assert_trees_equal(self, source_info, restored_info)
+            assert_trees_equal(self, source.critic.params, restored.critic.params)
+            assert_trees_equal(self, source.critic.fp8_meta, restored.critic.fp8_meta)
+
     def test_resident_target_checkpoint_round_trip_and_next_update(self):
         source = make_agent('fp8_direct', 'fp8_resident')
         batch = make_batch()
@@ -642,6 +1000,11 @@ class Fp8CriticTest(unittest.TestCase):
             validate_checkpoint_config(
                 {'critic_precision': 'fp8_direct'},
                 {'critic_precision': 'fp32'},
+            )
+        with self.assertRaises(ValueError):
+            validate_checkpoint_config(
+                {'critic_precision': 'fp8_direct'},
+                {'critic_precision': 'fp8_resident'},
             )
         with self.assertRaises(ValueError):
             validate_checkpoint_config(

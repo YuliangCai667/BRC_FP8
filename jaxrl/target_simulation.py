@@ -480,7 +480,7 @@ _teacher_update_jit = functools.partial(
     jax.jit,
     static_argnames=(
         'discount', 'tau', 'target_entropy', 'num_bins', 'v_max', 'multitask',
-        'num_tasks', 'collect_target_ema_diagnostics',
+        'num_tasks', 'collect_update_diagnostics',
     ),
 )(_update)
 

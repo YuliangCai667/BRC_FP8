@@ -86,6 +86,19 @@ def _tree_nbytes(tree) -> int:
     return total
 
 
+def _tree_nbytes_matching(tree, predicate) -> int:
+    import jax
+
+    total = 0
+    for leaf in jax.tree_util.tree_leaves(tree):
+        if not hasattr(leaf, "shape") or not hasattr(leaf, "dtype"):
+            continue
+        if not predicate(leaf.dtype):
+            continue
+        total += int(np.prod(leaf.shape, dtype=np.int64)) * int(leaf.dtype.itemsize)
+    return total
+
+
 class CheckpointManager:
     def __init__(
         self,
@@ -188,6 +201,24 @@ class CheckpointManager:
             for model in models
             for leaf in __import__('jax').tree_util.tree_leaves(model.fp8_meta)
         })
+        parameter_bytes = sum(_tree_nbytes(model.params) for model in models)
+        fp8_payload_bytes = sum(
+            _tree_nbytes_matching(
+                model.params, lambda dtype: str(dtype).startswith("float8_")
+            )
+            for model in models
+        )
+        fp8_metadata_bytes = sum(
+            _tree_nbytes(model.fp8_meta) for model in models
+        )
+        optimizer_bytes = (
+            sum(_tree_nbytes(model.opt_state) for model in models)
+            if fields.get("includes_optimizer")
+            else 0
+        )
+        persistent_state_bytes = (
+            parameter_bytes + fp8_metadata_bytes + optimizer_bytes
+        )
         return {
             "schema_version": CHECKPOINT_SCHEMA_VERSION,
             "kind": kind,
@@ -199,6 +230,31 @@ class CheckpointManager:
             "task_names": self.task_names,
             "parameter_dtypes": parameter_dtypes,
             "fp8_metadata_dtypes": fp8_metadata_dtypes,
+            "optimizer_dtypes": (
+                sorted({
+                    str(leaf.dtype)
+                    for model in models
+                    for leaf in __import__('jax').tree_util.tree_leaves(
+                        model.opt_state
+                    )
+                    if hasattr(leaf, 'dtype')
+                })
+                if fields.get("includes_optimizer")
+                else []
+            ),
+            "state_bytes": {
+                "parameters": parameter_bytes,
+                "fp8_payload": fp8_payload_bytes,
+                "high_precision_parameters": parameter_bytes - fp8_payload_bytes,
+                "fp8_metadata": fp8_metadata_bytes,
+                "optimizer": optimizer_bytes,
+                "persistent_total": persistent_state_bytes,
+                "fp8_metadata_fraction": (
+                    fp8_metadata_bytes / persistent_state_bytes
+                    if persistent_state_bytes
+                    else 0.0
+                ),
+            },
             "config": self.config,
             **fields,
         }

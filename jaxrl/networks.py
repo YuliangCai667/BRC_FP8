@@ -96,6 +96,12 @@ class ResidentFp8Dense(nn.Module):
             'bias', self.bias_init, (self.features,), jnp.float32
         )
 
+        if kernel.dtype != jnp.float8_e4m3fn:
+            kernel = (
+                jnp.asarray(kernel, dtype=jnp.float32)
+                / jnp.asarray(kernel_scale, dtype=jnp.float32)
+            ).astype(jnp.float8_e4m3fn)
+
         inputs = jnp.asarray(inputs, dtype=jnp.float32)
         activation_amax, activation_scale = _e4m3_amax_and_scale(inputs)
         activation_codes = (inputs / activation_scale).astype(jnp.float8_e4m3fn)

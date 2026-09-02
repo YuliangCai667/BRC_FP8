@@ -53,6 +53,25 @@ master parameters, and optimizer state remain FP32. Use
 `--critic_precision=fp8_direct`; per-tensor scaling uses a 1,024-entry amax
 history by default.
 
+For the naive online-resident baseline, use
+`--critic_precision=fp8_resident`. The same four residual kernels persist as
+E4M3 codes with one FP32 current-amax scale per ensemble member and are consumed
+directly by the FP8 GEMMs. Each AdamW step transiently dequantizes the current
+physical weight, forms the FP32 candidate using FP32 moments, and immediately
+writes new E4M3 codes and scales. The candidate is not returned as model state,
+saved in checkpoints, or retained for the next update; there is no full-size
+FP32 master or residual. Other Critic parameters remain FP32 in this first
+isolation stage.
+
+At tensor-stat intervals, the last real update reports only scalar write
+diagnostics: update norm retention and cosine, swallowed/code-unchanged
+fractions, weight-relative error, scale movement, a fixed-old-scale
+counterfactual, and same-batch expected-Q/JS/loss error. Raw resident codes are
+not copied into a second tensor-stat category; checkpoints retain the payload,
+while code-change fraction captures the write behavior needed for diagnosis.
+Checkpoint manifests report FP8 payload bytes, FP8 metadata bytes, optimizer
+bytes, total persistent-state bytes, and the metadata fraction.
+
 The same four logical Dense kernels in the target critic can instead remain
 device-resident in E4M3 with `--target_critic_precision=fp8_resident`. Each
 ensemble member has an independent FP32 per-tensor scale. Target activations are
@@ -82,6 +101,14 @@ The controlled target experiments are:
 - D: `--critic_precision=fp8_direct --target_critic_precision=fp8_resident`
 - Target-forward-only: `--critic_precision=fp8_direct --target_critic_precision=fp8_direct`
 - D-lag: `--critic_precision=fp8_direct --target_critic_precision=fp8_lag`
+
+The first online-resident Dogs arm keeps target parameters and EMA FP32 while
+retaining target FP8 GEMMs through `target_critic_precision=fp8_direct`. Run it
+manually as follows; the script does not queue or detach the job:
+
+```bash
+scripts/run_dogs_online_fp8_resident.sh GPU_ID 42
+```
 
 FP8-target checkpoints support same-mode recovery only. Converting an existing
 FP32 target checkpoint to direct, resident, or lag-coded FP8 is intentionally
