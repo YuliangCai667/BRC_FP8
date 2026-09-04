@@ -21,7 +21,11 @@ RESUME_CONFIG_KEYS = [
     "replay_buffer_size", "metaworld_reset_mode", "eval_seed_offset",
     "resolved_task_embedding_norm", "resolved_return_bootstrap",
     "resolved_entropy_correction", "critic_precision", "target_critic_precision",
-    "fp8_amax_history_length",
+    "fp8_amax_history_length", "fp8_resident_canonicalization",
+    "fp8_resident_carry", "carry_gain", "carry_dtype",
+    "resolved_fp8_resident_state",
+    "resolved_fp8_code_materialization",
+    "resolved_online_fp8_canonicalization", "resolved_online_fp8_backward",
 ]
 
 
@@ -37,7 +41,95 @@ def checkpoint_config_value(config: Mapping[str, Any], key: str):
         return config.get(key, "fp32")
     if key == "fp8_amax_history_length":
         return config.get(key, 1024)
+    if key == "fp8_resident_canonicalization":
+        return config.get(key, False)
+    if key == "fp8_resident_carry":
+        return config.get(key, False)
+    if key == "carry_gain":
+        return config.get(key, 16.0)
+    if key == "carry_dtype":
+        return config.get(key, "float8_e4m3fn")
+    if key == "resolved_fp8_resident_state":
+        if key in config:
+            return config[key]
+        return (
+            "carry_e4m3_shared_scale_gain16"
+            if config.get("fp8_resident_carry", False)
+            else "main_e4m3_shared_scale"
+        )
+    if key == "resolved_fp8_code_materialization":
+        return config.get(key, "legacy_compiler_elidable_cast")
+    if key == "resolved_online_fp8_canonicalization":
+        if key in config:
+            return config[key]
+        return (
+            "legacy_moving_anchor_or_unspecified"
+            if config.get("fp8_resident_canonicalization", False)
+            else "disabled"
+        )
+    if key == "resolved_online_fp8_backward":
+        if key in config:
+            return config[key]
+        precision = config.get("critic_precision", "fp32")
+        if precision == "fp8_resident":
+            return "generic_autodiff_unscaled_fp8"
+        if precision == "fp8_direct":
+            return "flax_e5m2_delayed_amax_custom_vjp"
+        return "none"
     return config.get(key)
+
+
+def fixed_anchor_norm_report(checkpoint_path: str | Path) -> Optional[dict]:
+    """Measure resident fixed-anchor invariants from saved bytes in NumPy FP64."""
+    import flax
+    from flax import traverse_util
+
+    checkpoint_path = Path(checkpoint_path).resolve()
+    with (checkpoint_path / "critic.msgpack").open("rb") as file:
+        raw_state = flax.serialization.msgpack_restore(file.read())
+    if raw_state.get("fp8_meta") is None:
+        return None
+    params = traverse_util.flatten_dict(raw_state["params"], sep="/")
+    metadata = traverse_util.flatten_dict(raw_state["fp8_meta"], sep="/")
+    anchor_paths = sorted(
+        path for path in metadata if path.endswith("/kernel_anchor_norm")
+    )
+    if not anchor_paths:
+        return None
+
+    members = {}
+    ratios = []
+    for anchor_path in anchor_paths:
+        layer_path = anchor_path.rsplit("/", 1)[0]
+        codes = np.asarray(params[f"{layer_path}/kernel"]).astype(np.float64)
+        scales = np.asarray(
+            metadata[f"{layer_path}/kernel_scale"], dtype=np.float64
+        )
+        anchors = np.asarray(metadata[anchor_path], dtype=np.float64)
+        reduce_axes = tuple(range(1, codes.ndim))
+        code_norms = np.sqrt(
+            np.sum(np.square(codes), axis=reduce_axes, dtype=np.float64)
+        )
+        layer_ratios = scales * code_norms / anchors
+        for member, ratio in enumerate(layer_ratios):
+            key = f"{layer_path}/ensemble_{member}"
+            members[key] = {
+                "anchor_norm": float(anchors[member]),
+                "stored_scale": float(scales[member]),
+                "code_norm_float64": float(code_norms[member]),
+                "anchor_norm_ratio": float(ratio),
+            }
+            ratios.append(float(ratio))
+
+    ratios = np.asarray(ratios, dtype=np.float64)
+    return {
+        "method": "numpy_float64_from_serialized_critic_checkpoint",
+        "member_count": int(ratios.size),
+        "min_anchor_norm_ratio": float(np.min(ratios)),
+        "max_anchor_norm_ratio": float(np.max(ratios)),
+        "max_abs_deviation_from_one": float(np.max(np.abs(ratios - 1.0))),
+        "members": members,
+    }
 
 
 def validate_checkpoint_config(previous: Mapping[str, Any], current: Mapping[str, Any]) -> bool:
@@ -66,6 +158,18 @@ def validate_checkpoint_config(previous: Mapping[str, Any], current: Mapping[str
             and old_target_precision not in ("fp8_direct", "fp8_lag")
         ):
             continue
+        if key == "resolved_online_fp8_backward" and precision_transition:
+            continue
+        if key == "resolved_fp8_code_materialization":
+            materialized_precisions = {"fp8_resident", "fp8_current_master"}
+            materialized_target_precisions = {"fp8_resident", "fp8_lag"}
+            if (
+                old_precision not in materialized_precisions
+                and new_precision not in materialized_precisions
+                and old_target_precision not in materialized_target_precisions
+                and new_target_precision not in materialized_target_precisions
+            ):
+                continue
         old = checkpoint_config_value(previous, key)
         new = checkpoint_config_value(current, key)
         if old is not None and new is not None and old != new:
@@ -96,6 +200,25 @@ def _tree_nbytes_matching(tree, predicate) -> int:
         if not predicate(leaf.dtype):
             continue
         total += int(np.prod(leaf.shape, dtype=np.int64)) * int(leaf.dtype.itemsize)
+    return total
+
+
+def _tree_nbytes_at_paths(tree, path_predicate, dtype_predicate=None) -> int:
+    from flax import traverse_util
+
+    if tree is None:
+        return 0
+    total = 0
+    for path, leaf in traverse_util.flatten_dict(tree).items():
+        if not path_predicate(path):
+            continue
+        if not hasattr(leaf, "shape") or not hasattr(leaf, "dtype"):
+            continue
+        if dtype_predicate is not None and not dtype_predicate(leaf.dtype):
+            continue
+        total += int(np.prod(leaf.shape, dtype=np.int64)) * int(
+            leaf.dtype.itemsize
+        )
     return total
 
 
@@ -192,6 +315,15 @@ class CheckpointManager:
         os.replace(temp_path, final_path)
         return final_path
 
+    @staticmethod
+    def _write_fixed_anchor_report(path: Path) -> Optional[dict]:
+        report = fixed_anchor_norm_report(path)
+        if report is not None:
+            (path / "fixed_anchor_norms.json").write_text(
+                json.dumps(report, indent=2), encoding="utf-8"
+            )
+        return report
+
     def _base_manifest(self, kind: str, env_step: int, agent, **fields):
         models = [agent.actor, agent.critic, agent.target_critic, agent.temp]
         parameter_dtypes = sorted({str(leaf.dtype) for model in models
@@ -210,6 +342,25 @@ class CheckpointManager:
         )
         fp8_metadata_bytes = sum(
             _tree_nbytes(model.fp8_meta) for model in models
+        )
+        resident_main_code_bytes = _tree_nbytes_at_paths(
+            agent.critic.params,
+            lambda path: path[-1] == "kernel"
+            and any(part.startswith("BronetBlock_") for part in path),
+            lambda dtype: str(dtype) == "float8_e4m3fn",
+        )
+        resident_carry_code_bytes = _tree_nbytes_at_paths(
+            agent.critic.fp8_meta,
+            lambda path: path[-1] == "kernel_carry",
+        )
+        resident_carry_fp32_bytes = _tree_nbytes_at_paths(
+            agent.critic.fp8_meta,
+            lambda path: path[-1] == "kernel_carry",
+            lambda dtype: str(dtype) == "float32",
+        )
+        resident_weight_scale_bytes = _tree_nbytes_at_paths(
+            agent.critic.fp8_meta,
+            lambda path: path[-1] == "kernel_scale",
         )
         optimizer_bytes = (
             sum(_tree_nbytes(model.opt_state) for model in models)
@@ -247,6 +398,10 @@ class CheckpointManager:
                 "fp8_payload": fp8_payload_bytes,
                 "high_precision_parameters": parameter_bytes - fp8_payload_bytes,
                 "fp8_metadata": fp8_metadata_bytes,
+                "resident_main_code": resident_main_code_bytes,
+                "resident_carry_code": resident_carry_code_bytes,
+                "resident_carry_fp32": resident_carry_fp32_bytes,
+                "resident_weight_scale": resident_weight_scale_bytes,
                 "optimizer": optimizer_bytes,
                 "persistent_total": persistent_state_bytes,
                 "fp8_metadata_fraction": (
@@ -268,9 +423,11 @@ class CheckpointManager:
         temp_path = self._prepare_temp(final_path)
         try:
             agent.save(str(temp_path), include_optimizer=False)
+            fixed_anchor_report = self._write_fixed_anchor_report(temp_path)
             manifest = self._base_manifest(
                 "analysis", env_step, agent, includes_optimizer=False,
                 includes_replay_buffer=False, is_final=bool(is_final),
+                fixed_anchor_norms=fixed_anchor_report,
             )
             (temp_path / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
             self._validate_files(temp_path, include_replay=False)
@@ -311,6 +468,7 @@ class CheckpointManager:
                 save_replay_buffer = False
 
             agent.save(str(temp_path), include_optimizer=True)
+            fixed_anchor_report = self._write_fixed_anchor_report(temp_path)
             state = {
                 "python_random_state": random.getstate(),
                 "numpy_random_state": np.random.get_state(),
@@ -326,6 +484,7 @@ class CheckpointManager:
                 "recovery", env_step, agent, includes_optimizer=True,
                 includes_replay_buffer=replay_saved, degraded_reason=degraded_reason,
                 wandb_id=wandb_id, is_final=bool(is_final),
+                fixed_anchor_norms=fixed_anchor_report,
             )
             (temp_path / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
             self._validate_files(temp_path, include_replay=replay_saved)

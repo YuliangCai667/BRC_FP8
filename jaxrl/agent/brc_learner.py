@@ -14,6 +14,7 @@ from jaxrl.agent.update import (
     get_critic_gradients,
     initialize_critic_optimizer,
     initialize_target_critic,
+    reconstruct_carry_logical_critic_params,
     reconstruct_target_params,
     target_ema_diagnostics,
     update_actor,
@@ -449,7 +450,17 @@ class BRC(object):
         critic_precision: str = 'fp32',
         target_critic_precision: str = 'fp32',
         fp8_amax_history_length: int = 1024,
+        fp8_resident_canonicalization: bool = False,
+        fp8_resident_carry: bool = False,
     ) -> None:
+        if fp8_resident_carry and critic_precision != 'fp8_resident':
+            raise ValueError(
+                'fp8_resident_carry requires critic_precision=fp8_resident'
+            )
+        if fp8_resident_carry and fp8_resident_canonicalization:
+            raise ValueError(
+                'fp8_resident_carry requires fixed-anchor canonicalization off'
+            )
         
         action_dim = actions.shape[-1]
         self.action_dim = float(action_dim)
@@ -463,6 +474,8 @@ class BRC(object):
         self.critic_precision = critic_precision
         self.target_critic_precision = target_critic_precision
         self.fp8_amax_history_length = fp8_amax_history_length
+        self.fp8_resident_canonicalization = fp8_resident_canonicalization
+        self.fp8_resident_carry = fp8_resident_carry
         
         self.num_tasks = num_tasks
         self.embedding_size = embedding_size
@@ -489,6 +502,10 @@ class BRC(object):
                 task_embedding_norm=task_embedding_norm,
                 critic_precision=critic_precision,
                 fp8_amax_history_length=fp8_amax_history_length,
+                fp8_resident_canonicalization=(
+                    fp8_resident_canonicalization
+                ),
+                fp8_resident_carry=fp8_resident_carry,
             )
             critic_reference_def = Critic(
                 num_tasks=num_tasks,
@@ -717,11 +734,43 @@ class BRC(object):
                     if path.endswith('/kernel_scale')
                 }),
             }
+            fixed_anchor_norms = {
+                path: value
+                for path, value in critic_meta_flat.items()
+                if path.endswith('/kernel_anchor_norm')
+            }
+            if fixed_anchor_norms:
+                storage['fixed_anchor_norms'] = _split_ensemble_arrays(
+                    fixed_anchor_norms
+                )
             if self.last_online_resident_diagnostics is not None:
                 storage['last_applied_update'] = (
                     self.last_online_resident_diagnostics
                 )
             diagnostics['fp8_online_storage'] = storage
+            if self.fp8_resident_carry:
+                logical_params = traverse_util.flatten_dict(
+                    reconstruct_carry_logical_critic_params(self.critic),
+                    sep='/',
+                )
+                physical_params = traverse_util.flatten_dict(
+                    dequantize_critic_params(self.critic), sep='/'
+                )
+                storage['carry_codes'] = _split_ensemble_arrays({
+                    path: value
+                    for path, value in critic_meta_flat.items()
+                    if path.endswith('/kernel_carry')
+                })
+                storage['logical_kernels'] = _split_ensemble_arrays({
+                    path: value
+                    for path, value in logical_params.items()
+                    if '/BronetBlock_' in path and path.endswith('/kernel')
+                })
+                storage['physical_kernels'] = _split_ensemble_arrays({
+                    path: value
+                    for path, value in physical_params.items()
+                    if '/BronetBlock_' in path and path.endswith('/kernel')
+                })
         if self.target_critic_precision in ('fp8_direct', 'fp8_lag'):
             diagnostics['fp8_target_forward'] = self._fp8_diagnostics(
                 self.target_critic, include_output_grad=False
@@ -834,7 +883,9 @@ class BRC(object):
         self.actor = self.actor.load(f'{path}/actor.msgpack')
         self.critic = self.critic.load(
             f'{path}/critic.msgpack',
-            require_fp8_metadata=self.critic_precision == 'fp8_resident',
+            require_fp8_metadata=self.critic_precision in (
+                'fp8_resident', 'fp8_current_master'
+            ),
         )
         self.target_critic = target_critic
         self.temp = self.temp.load(f'{path}/temp.msgpack')

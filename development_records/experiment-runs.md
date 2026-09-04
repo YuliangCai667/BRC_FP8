@@ -34,6 +34,18 @@
 | 2026-09-01 15:18 | `brc_dmc_dogs_online_fp8_resident_s42-20260901-151810` / `vv3x4xuh` | 完成 | `EXP-FP8-ONLINE-RESIDENT-DIAG-S42-B`：增加 optimizer/quantization-error 径向 cosine 后从头重跑 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `124de8a` + 未提交实现 | 500k 最终 / 最佳 / 末 3 次平均 return `505.98 / 530.14 / 512.29`；critic pnorm `11428.8`，诊断为 scale-dominated norm runaway |
 | 2026-09-02 05:19 | `brc_dmc_dogs_online_fp8_resident_s42-20260902-051913` / `ozhbrc8v` | 完成 | `EXP-FP8-ONLINE-RESIDENT-MECH-S42`：angular/norm/decay/scale-code 机制诊断增强 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `124de8a` + 未提交诊断实现 | 500k 最终 / 最佳 / 末 3 次 `667.78 / 667.78 / 625.50`；pnorm `9641.4`；NaN/Inf `0/0` |
 | 2026-09-02 05:23 | `brc_dmc_dogs_online_fp8_resident_s1-20260902-052342` / `zymfcugz` | 完成 | `EXP-FP8-ONLINE-RESIDENT-MECH-S1`：同协议第二种子 | 1 / GPU 0 | `codex/blackwell-fp8-direct` @ `124de8a` + 同一未提交诊断实现 | 500k 最终 / 最佳 / 末 3 次 `564.03 / 564.03 / 534.04`；pnorm `19714.7`；NaN/Inf `0/0` |
+| 2026-09-03 03:11 | `brc_dmc_dogs_online_fp8_resident_canonical_s42-20260903-031138` / `fsd8vwfb` | 主动停止（moving-anchor implementation failure） | `EXP-FP8-ONLINE-CANON-S42`：moving-anchor FP8 Residency | 42 / GPU 2（共享） | `codex/blackwell-fp8-direct` @ `5500f6a` + 未提交 moving-anchor 实现 | 停止于 env step 55152 / update 100305；55k pnorm `2041.5`；resident norm 25k→50k `804.1→1833.9`；不属于 fixed-anchor 结果 |
+| 2026-09-03 03:11 | `brc_dmc_dogs_online_fp8_resident_canonical_s1-20260903-031138` / `97nf6rie` | 主动停止（moving-anchor implementation failure） | `EXP-FP8-ONLINE-CANON-S1`：同协议第二种子 | 1 / GPU 3（共享） | 同一 dirty source snapshot | 停止于 env step 47628 / update 85257；47k pnorm `1763.0`；不属于 fixed-anchor 结果 |
+| 2026-09-03 05:04 | `brc_dmc_dogs_online_fp8_resident_fixed_anchor_s42-20260903-050448` / `crwzhu6b` | 25k 完成；机制门通过 | `EXP-FP8-ONLINE-FIXED-ANCHOR-S42-25K`：fixed-anchor 机制门 | 42 / GPU 3（共享） | `codex/blackwell-fp8-direct` @ `5500f6a` + 未提交 fixed-anchor 实现 | checkpoint NumPy float64：8/8 ratio `0.9999168–1.0002157`；25k pnorm `359.29`；允许 recovery 续跑 500k |
+| 2026-09-03 05:36 | 同一 run / W&B | 主动停止（backward-invalid negative control） | `EXP-FP8-ONLINE-FIXED-ANCHOR-S42-R500K`：25k recovery→500k | 42 / GPU 3（共享） | 同一 dirty fixed-anchor source snapshot | 15:15:06 停止于 env `452791` / update `895583`；450k eval `608.65`；anchor 稳定但 resident kernel backward 全零 |
+| 2026-09-03 15:37 | `brc_dmc_dogs_online_fp8_resident_scaled_backward_s42-20260903-153745` / `z6n3ca1s` | 运行中 | `EXP-FP8-ONLINE-SCALED-BWD-S42-500K`：scale-aware repaired backward、无 canonicalization | 42 / GPU 3 | `codex/blackwell-fp8-direct` @ `5500f6a` + 未提交 repaired-backward 实现 | 150k eval `177.48`；75k norm runaway 已复现，梯度非零、NaN/Inf `0/0` |
+| 2026-09-03 17:16 | `brc_dmc_dogs_online_fp8_resident_fixed_anchor_s42-20260903-171625` / `p7osuon0` | 运行中；100k 已否定充分性 | `EXP-FP8-ONLINE-SCALED-BWD-FIXED-ANCHOR-S42-500K`：repaired backward + fixed-initial anchor | 42 / GPU 0 | 同一 HEAD + 未提交 repaired-backward/fixed-anchor 实现 | 100k eval `134.44`，低于 repaired-only/direct 的 `157.98/340.61`；8/8 anchor 独立 ratio `0.9999815–1.0004089`，梯度非零 |
+| 2026-09-03 18:47 | `brc_dmc_dogs_online_fp8_current_master_s42-20260903-184747` / `vgd8apty` | 运行中；100k 因果结论成立 | `EXP-FP8-ONLINE-CURRENT-MASTER-S42-150K`：current-amax FP8 compute、scale-aware backward、FP32 online master | 42 / GPU 1 | 同一 HEAD + 未提交 current-master 隔离对照 | 100k return `244.89`，高于 repaired/fixed `157.98/134.44`，direct `340.61`；内部轨迹贴近 direct，run 继续 150k |
+| 2026-09-04 02:33 / 02:41 | `brc_dmc_dogs_online_fp8_resident_carry_e4m3_g16_smoke_s42-20260904-023355` / `...-024134` | 完成 | `EXP-FP8-ONLINE-CARRY-S42-SMOKE-5K`：CARRY-FP8 工程 smoke 与相邻步诊断 | 42 / GPU 1 | `codex/blackwell-fp8-direct` @ `5500f6a` + 未提交 CARRY-FP8 与既有研究改动 | 5001 env / 5 updates；四层梯度非零；carry saturation `0`；checkpoint 恢复后的下一批更新重建误差降低 `39.65x–43.32x`；无 NaN/Inf |
+| 2026-09-04 02:47 | `brc_dmc_dogs_online_fp8_resident_carry_e4m3_g16_s42` / `a4h7dp4d` | 主动停止；机制无效 | `EXP-FP8-ONLINE-CARRY-S42-500K`：pre-barrier negative control | 42 / GPU 1 | 同一 HEAD + recorder 保存的当前 dirty source snapshot | 04:23 停止于 env 136418 / update 262837；GPU JIT 旁路 FP8 narrowing/widening，carry 8/8 全零，不能作为 CARRY treatment |
+| 2026-09-04 02:47 | `brc_dmc_dogs_online_fp8_resident_carry_e4m3_g16_s1` / `ddivbdzt` | 主动停止；机制无效 | `EXP-FP8-ONLINE-CARRY-S1-500K`：pre-barrier negative control | 1 / GPU 2 | 同一 HEAD + recorder 保存的当前 dirty source snapshot | 04:23 停止于 env 136339 / update 262679；同一 code-side barrier 缺失，不能作为 CARRY treatment |
+| 2026-09-04 04:48 | `...jitbarrier_v1_s42` / `7mdayzva`; `...jitbarrier_v1_s1` / `hxf61n84` | seed42 主动停止；seed1 完成 | `EXP-FP8-ONLINE-CARRY-JITBARRIER-S42/S1-500K`：修复后双 seed 正式实验 | 42 / GPU 1；1 / GPU 2 | `codex/blackwell-fp8-direct` @ `5500f6a` + 未提交修复/研究改动 | seed42 于 454409 停止以替换 target-lag，450k eval/best `832.74`；seed1 500k final/best/末3均值 `782.86/807.60/793.28`；全程 NaN/Inf 0 |
+| 2026-09-04 10:32 | `...jitbarrier_v1_target_lag_s42` / `5o2266m9` | 运行中；25k 机制/学习门通过 | `EXP-FP8-ONLINE-CARRY-TARGET-LAG-S42-500K`：online CARRY-FP8 + target lag-coded FP8 | 42 / GPU 1 | 同一 branch/HEAD + 当前未提交实现；fresh initialization | 25k eval `58.07`；两侧 8/8 持久码非零，925 条 tensor stats NaN/Inf 0；继续观察 50k/75k |
 
 ## 已完成：原始 BRC 三种子基线
 
@@ -616,6 +628,709 @@ tmux new-session -d -s brc_dmc_dogs_target_fp8_lag_s42 \
   `505.98`，而本轮 `667.78`；source snapshot 除诊断代码外一致，说明长期
   return 对 GPU 数值/轨迹扰动敏感，但 norm/scale/angular 机制跨三次 run
   保持复现。
+
+## 已停止：Moving-Anchor FP8 Residency（implementation failure）
+
+### `EXP-FP8-ONLINE-CANON-S42/S1`
+
+这两条 run 只检验 previous-physical-norm moving anchor，不是 fixed-initial-
+anchor canonicalization 的结果；其目录、W&B 和停止记录全部保留。
+
+- 状态：两者于 2026-09-03 03:11:38 Asia/Shanghai 直接启动 500k。按用户
+  明确要求，没有等待现有 GPU 进程结束，并跳过 10k/Phase C 50k 预跑。
+  在确认主要 norm invariant 失败后，按用户要求于 04:12:35 向两个 tmux
+  会话发送 `Ctrl-C`。seed42 在 env step `55152` / update `100305`、seed1 在
+  env step `47628` / update `85257` 分别写入 `run_interrupted`（
+  `KeyboardInterrupt`）与 `run_finished`；04:13:25 复核时两个 tmux、原 PID
+  `4136808/4136812` 及其 GPU compute process 均已不存在。
+- 目的 / Idea：Idea 002；以 per-update norm canonicalization 直接干预已诊断的
+  `scale-gauge norm runaway → effective angular-step collapse`，检验机制和最终
+  return 是否同时恢复。
+- 代码：`/home/caiyuliang/BRC_FP8_blackwell_fp8`，分支
+  `codex/blackwell-fp8-direct`，HEAD `5500f6a50fe92f17cf9c5e78e7f4076e00e0b958`
+  加未提交实现与研究记录；变更说明见
+  [2026-09-03-gauge-fixed-fp8-residency.md](2026-09-03-gauge-fixed-fp8-residency.md)。
+- 协议：Dogs、500k、seed `42/1`、eval seed offset 0、width 4096、batch 1024、
+  每环境步 2 updates、25k eval/tensor stats、10 eval episodes；online
+  `fp8_resident` + canonicalization，target `fp8_direct` + FP32 persistent params，
+  FP32 AdamW moments，current-amax E4M3 code 不变。
+- 对照：seed42 对比 `EXP-FP8-TARGET-FWD-S42` 和
+  `EXP-FP8-ONLINE-RESIDENT-MECH-S42`；seed1 对比
+  `EXP-FP8-ONLINE-RESIDENT-MECH-S1`，但没有 matched FP32-weight seed1 control。
+- 资源：登记时 GPU2 已有 PID `3248781` 使用约 24.5 GiB，GPU3 已有 PID
+  `3250250` 使用约 29.2 GiB；故不使用 wall clock、吞吐或能耗作方法证据。
+- seed42：tmux `brc_fp8_canonical_s42_gpu2`，PID `4136808`，run
+  `brc_dmc_dogs_online_fp8_resident_canonical_s42-20260903-031138`，
+  [W&B `fsd8vwfb`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/fsd8vwfb)，
+  目录 `runs/DMC_DOGS/brc_dmc_dogs_online_fp8_resident_canonical_s42-20260903-031138`；
+  命令 `scripts/run_dogs_online_fp8_resident_canonical.sh 2 42`。
+- seed1：tmux `brc_fp8_canonical_s1_gpu3`，PID `4136812`，run
+  `brc_dmc_dogs_online_fp8_resident_canonical_s1-20260903-031138`，
+  [W&B `97nf6rie`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/97nf6rie)，
+  目录 `runs/DMC_DOGS/brc_dmc_dogs_online_fp8_resident_canonical_s1-20260903-031138`；
+  命令 `scripts/run_dogs_online_fp8_resident_canonical.sh 3 1`。
+- 启动验收：03:11:49 两个 tmux 和训练 PID 均存在；NVIDIA-SMI 将 PID
+  `4136808/4136812` 分别映射到 GPU2/GPU3；两个 run 的 config 均解析为
+  `max_steps=500000`、正确 seed、online `fp8_resident`、
+  `fp8_resident_canonicalization=true`、resolved canonicalization
+  `preserve_previous_kernel_norm_with_paired_bias`、target `fp8_direct`；W&B、
+  recorder 和 model initialization 均完成，未见立即错误。
+- 2026-09-03 04:11 Asia/Shanghai 机制核验：两条 tmux/PID 仍存活，但主要
+  norm invariant 已失败。seed42 的 `critic_pnorm` 在 env step
+  `5k/10k/25k/50k` 为 `328.7/347.9/842.9/1862.4`；四个 resident kernel
+  合并 norm 从 `804.1` 增至 `1833.9`（`2.281x`）。matched naive seed42
+  同期为 `441.1→794.1`（`1.800x`），所以不是总 pnorm 中其他 FP32 leaves
+  的口径假象。seed1 在 `5k/10k/25k` 的 pnorm 为
+  `328.7/366.3/782.3`，同样未被固定。
+- 矛盾诊断：seed42 的 sampled per-write
+  `post_to_old_kernel_norm_ratio` 仍落在
+  `0.99999988–1.00000012`，但 25k→50k 跨 50,000 learner updates 的合并
+  resident norm 增长 `2.281x`，等价于平均每 update 约 `+1.65e-5`。code L2
+  基本稳定而 stored scale 漂移；例如 `Block0/Dense1/ensemble1` 的 norm
+  `623.7→1542.1`、scale `0.001900→0.004697`，code L2
+  `328314→328320`。这排除开关未启用，支持 previous-physical-norm 的 FP32
+  reduction/scale recurrence 累积数值漂移；同一计算图内的单步 ratio 因与
+  canonicalization 共享 reduction，不能作为独立的长期 invariant 验证。
+- 当前解释：这两个 run 已证伪“无需 reference norm 即可递推保持初始化半径”
+  的预注册主张，并作为该有限精度递推的负结果保留。更稳健的候选是每个
+  kernel/member 持久保存一个固定初始化 radius（共 8 个 FP32 scalar），每次
+  直接从该 anchor 和 next code norm 计算最终 scale；该修订尚未实现或启动。
+- 若继续固定-anchor 修订，其成功判断应改为独立检查每个 kernel/member 相对
+  固定初始化 radius 的长期误差，而不能再以同一写入图内的 post/old ratio
+  代替；同时要求 stored scale 不再长期承担 norm 膨胀，angular diagnostics
+  与 Q/function-write 指标有限，并比较 seed42 的 matched return。
+
+## Fixed-Initialization-Anchor FP8 Residency
+
+### `EXP-FP8-ONLINE-FIXED-ANCHOR-S42-25K`
+
+- 状态：实现与本地验证完成；2026-09-03 05:04:48 Asia/Shanghai 已在
+  GPU3 启动 seed42 25k 机制门。tmux
+  `brc_fp8_fixed_anchor_s42_gpu3_25k`，训练 PID `330805`，run
+  `brc_dmc_dogs_online_fp8_resident_fixed_anchor_s42-20260903-050448`，W&B
+  `crwzhu6b`。启动后 tmux/PID/GPU process、run 目录、初始化事件均存在；
+  resolved method 为 `fixed_initial_kernel_norm_with_paired_bias`。
+- 目的 / Idea：Idea 002 的 fixed-anchor 修订。每个 resident kernel/member 持久
+  保存初始化物理 norm（4 kernels × 2 members = 8 个 FP32 scalar）；每次只
+  保留 current-amax 选出的 code，并直接以 `rho0 / ||code||` 写 scale。
+- 代码：`codex/blackwell-fp8-direct` @ `5500f6a50fe92f17cf9c5e78e7f4076e00e0b958`
+  加未提交 fixed-anchor 实现；变更记录见
+  [2026-09-03-fixed-anchor-fp8-residency.md](2026-09-03-fixed-anchor-fp8-residency.md)。
+- 协议：Dogs、seed42、GPU3、width4096、batch1024、2 updates/env step；先到
+  25k，完成后从同一 final recovery checkpoint 继续到 500k。其余协议与已停止
+  moving-anchor seed42 run 一致。
+- 机制门：用 final checkpoint 中实际序列化的 code/scale/rho0，以 NumPy
+  float64 独立计算 8 个 `scale * ||code|| / rho0`。八个成员均存在且没有长期
+  scale/norm 漂移后才允许续跑；不以同一训练图内 JAX FP32 ratio 作为唯一依据。
+- 验证：完整 CPU FP8/checkpoint suite 29 tests 通过（160.334s）；GPU3 上
+  10,000-write 与真实 resident update smoke 通过。启动脚本：
+  `scripts/run_dogs_online_fp8_resident_fixed_anchor.sh 3 42 25000`。
+- 25k 结果：2026-09-03 05:35:06 Asia/Shanghai 正常写入
+  `final_checkpoints_finished` 和 `run_finished`，env step `25000` / update
+  `40003`；最终 train `critic_pnorm=359.2903`，eval return `48.0575`，更新
+  NaN/Inf `0/0`。analysis/recovery 两个 checkpoint 的独立 NumPy float64
+  报告完全一致，8/8 member 的 `anchor_norm_ratio` 为
+  `0.9999168158–1.0002157129`，最大绝对偏差 `2.1571294e-4`。相对固定
+  `rho0=90.5096664` 未见 moving-anchor 的单调尺度漂移，机制门通过。
+- 续跑：`EXP-FP8-ONLINE-FIXED-ANCHOR-S42-R500K` 将从同一 run 的
+  `checkpoints/recovery_step_000000025000` 恢复 optimizer、replay 和八个 anchor，
+  命令 `scripts/run_dogs_online_fp8_resident_fixed_anchor.sh 3 42 500000
+  <recovery-checkpoint>`。
+- 续跑启动验收：2026-09-03 05:36:44 Asia/Shanghai 在 GPU3 启动，tmux
+  `brc_fp8_fixed_anchor_s42_gpu3_500k`，PID `453470`。同一 W&B `crwzhu6b`
+  与 run 目录已恢复；事件流写入 env step 25000 / update 40003 的
+  `resume_reset`、`initialization_finished(resumed=true)`，并完成 env step 25001
+  / update 40005 的首次真实更新。GPU3 compute process 正常存在。
+- 425k outcome readout（observed）：eval mean 从 25k 的 `48.06` 上升到
+  400k 的 `572.84`，425k 回落到 `499.04`；严格 matched
+  `EXP-FP8-TARGET-FWD-S42` 在 400k/425k 为 `766.69/764.57`。fixed-anchor
+  不是完全不学习，但没有关闭 return gap。425k 的四任务 return 为
+  `931.64/600.54/243.99/219.96`，差距主要来自 walk/trot/run。
+- Anchor/write check（observed）：400k checkpoint 的独立 NumPy float64
+  ratio 为 `0.9996764–1.0035631`；25k/50k/350k/400k 的最大偏差分别为
+  `2.16e-4/2.01e-3/1.93e-3/3.56e-3`，上下波动而非递归单调漂移。425k
+  四个 resident kernel 合并 physical norm 为 `255.995`（理论固定值约
+  `256.0`），而总 critic pnorm `1127.25` 的增长主要来自非 resident FP32
+  kernel（合并 `1079.40`）。最后一次 function-write expected-Q MAE
+  `2.93e-5`，只说明 candidate→canonical write 保真。
+- Backward failure（observed）：fixed-anchor run 已有 17 个 tensor-stat
+  时点，四个 resident kernel 的 gradient 共 `68/68` 条均为
+  `l2_norm=0, zero_fraction=1`；完成的 naive resident seed42 同样为
+  `80/80` 全零，而严格 matched FP8-direct control 的 `80/80` 条均非零。
+  同一 425k batch 的 resident Dense bias gradient 非零，故不是整个 critic
+  loss 或 recorder 失效，而是 kernel FP8 dot operand 的反向路径失效。
+- Root cause（code evidence + isolated probe）：`ResidentFp8Dense` 直接依赖
+  raw `lax.dot_general(E4M3,E4M3)` 的自动微分，并在 dot 外乘 activation/kernel
+  scale；它没有 Flax `Fp8DirectDotGeneralOp` 的 custom VJP、E5M2 output-gradient
+  dynamic scaling 与反向 dequantization。因而未缩放 cotangent 先被转换为 FP8，
+  再除 scale，典型梯度在转换前已下溢为零。使用 resident 实际量级
+  `activation_scale=0.5, kernel_scale=2e-4` 的独立 GPU probe，在 output-gradient
+  sigma `1e-3` 时 resident kernel gradient 为全零，而数学等价 FP32 gradient
+  L2 为 `151.17`；sigma `1e-2` 时仍有 `90.23%` 坐标为零，显示 cliff/spike
+  而非正常低精度反向。
+- Interpretation：fixed anchor 已修复它承诺的 norm recurrence，但原先
+  “scale-gauge runaway 是 return gap 主因”的闭环因果解释被本次干预否定。
+  现在的首要 failure mode 是 online resident 手写 GEMM 缺少 scaled backward；
+  大矩阵只会从偶发越过 FP8 梯度阈值的 spike/残留 Adam moment 获得更新，
+  input/output projection、bias、LayerNorm 和 residual skip 仍可学习，所以 reward
+  会缓慢上升而达不到 FP8-direct control。此前 parameter/function-write 指标位于
+  optimizer candidate 之后，不能验证 candidate 之前的 backward，因此没有暴露
+  这一故障。
+- 停止记录：按用户要求于 2026-09-03 15:15:06 Asia/Shanghai 向 tmux
+  `brc_fp8_fixed_anchor_s42_gpu3_500k` 发送 `Ctrl-C`。run 在 env step
+  `452791` / update `895583` 写入 `run_interrupted(KeyboardInterrupt)` 与
+  `run_finished`；tmux 和 PID `453470` 均已退出。最后完整 eval 为 450k
+  `608.6501`，最后 train metric 为 452k，NaN/Inf `0/0`。目录、400k recovery
+  与 450k analysis checkpoint 均保留；该 run 可作为“只固定 norm 不能修复
+  backward-invalid operator”的 negative control，但不能评价正确 backward 下
+  fixed-anchor 的 return 效果。
+
+## Scale-Aware Online-Resident FP8 Backward
+
+### `EXP-FP8-ONLINE-SCALED-BWD-S42-500K`
+
+- 状态：2026-09-03 15:32 Asia/Shanghai 完成实现与预运行数值门；15:37:45
+  已在 GPU3 直接启动正式 seed42 500k。tmux
+  `brc_fp8_scaled_backward_s42_gpu3`，训练 PID `2393746`，run
+  `brc_dmc_dogs_online_fp8_resident_scaled_backward_s42-20260903-153745`，
+  [W&B `z6n3ca1s`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/z6n3ca1s)。
+  旧 fixed-anchor run 已于 15:15:06 停止并保留为 backward-invalid negative
+  control。
+- 目的 / Idea：Idea 002；只修复 resident Dense backward。online 大 kernel
+  继续以 E4M3 code + FP32 scale 常驻、AdamW moments 保持 FP32、candidate
+  继续 current-amax E4M3 单次写回；canonicalization 明确关闭，target 继续
+  `fp8_direct` + FP32 persistent parameters。
+- Backward：复用 Flax `quantized_dot` custom VJP 和与 FP8-direct 相同的
+  E5M2 output-gradient delayed-amax scaling/FP32 accumulation；直接返回 physical
+  FP32 kernel/input gradient。四层×两 member 的 output-gradient scale/history
+  纳入 checkpoint，actor 的 critic backward 同样推进这组 metadata。
+- 代码：`/home/caiyuliang/BRC_FP8_blackwell_fp8`，分支
+  `codex/blackwell-fp8-direct`，HEAD
+  `5500f6a50fe92f17cf9c5e78e7f4076e00e0b958` 加未提交实现与记录；没有提交
+  或推送。变更说明见
+  [2026-09-03-scale-aware-resident-fp8-backward.md](2026-09-03-scale-aware-resident-fp8-backward.md)。
+- Independent probe（observed）：`sx=0.5, sw=2e-4`，output-gradient sigma
+  `1e-3/1e-2`。repaired resident 对 FP8-direct 的 kernel cosine/L2 ratio 均
+  `1.0/1.0`，input gradient 也等价，zero fraction 均 `0`；对 FP32 cosine
+  约 `0.9986`。机器记录：`scale_aware_backward_independent_probe.json`。
+- Real replay gate（observed）：从 matched Dogs seed42 recovery replay 取 256
+  transitions、width512、共同 physical weights。四个 kernel 对 direct 的
+  cosine `0.99927–0.99994`、L2 ratio `0.99977–1.00081`，全部非零；`dQ/da`
+  cosine `0.98988`、ratio `1.00182`、zero fraction `0`。机器记录：
+  `scale_aware_backward_real_batch_probe.json`。
+- Smoke（observed）：GPU0 `cheetah-run` 到 env 200 / update 203 正常结束，
+  update NaN/Inf 始终 `0/0`。step150 四个 resident kernel gradient L2 为
+  `0.36380/0.41178/0.29192/0.33431`，zero fraction
+  `0/0.00883/0/0.02454`，均无 NaN/Inf；actor gradient 有限非零。run
+  `brc_cheetah_run_online_fp8_resident_scaled_backward_s0_smoke`，未上传 W&B。
+- 测试：resident-focused CPU tests `3/3` 通过；修正 checkpoint transition
+  guard 后，完整 FP8 suite `27/27` 通过（166.881s）；`git diff --check` 通过。
+- 正式协议：Dogs seed42、GPU3、width4096、batch1024、2 updates/env step，
+  直接 500k，25k eval/tensor stats、50k analysis、100k recovery。用户于启动前
+  取消单独 25k gate；仅做启动验收，不持续监视，发现问题时由用户手动停止。
+  seed1 必须等 seed42 完成，不并行启动。
+- 启动脚本：`scripts/run_dogs_online_fp8_resident_scaled_backward.sh 3 42
+  500000`。
+- 启动验收（observed）：tmux/PID 与 GPU3 compute process 存在，W&B 已开始
+  同步；run config 解析为 `max_steps=500000`、seed42、width4096、online
+  `fp8_resident`、`resolved_online_fp8_backward=scale_aware_e5m2_delayed_amax_custom_vjp`、
+  `resolved_online_fp8_canonicalization=disabled`、无 FP32 weight master、target
+  `fp8_direct`。按用户要求此后不做长期自动监视，异常由用户手动停止。
+  `initialization_finished` 于启动后 12.78s 正常写入；移交前已推进至 env
+  step 4000，未见立即错误。
+- 94k readout（observed，2026-09-03 17:13 Asia/Shanghai）：run/tmux/PID 仍
+  正常，update NaN/Inf 为 `0/0`。25k/50k/75k eval return 为
+  `45.94/101.41/129.44`；matched FP8-direct control 为
+  `19.92/120.40/220.44`，到 75k 已落后 `91.00`。75k 四任务 return 为
+  repaired `299.42/70.68/78.21/69.44`，control
+  `403.69/225.05/154.85/98.17`。
+- Backward/write check（observed）：25k/50k/75k 四个 resident kernel
+  gradient L2 均非零；其 zero fraction 与 FP8-direct 一样会因 E5M2/网络结构
+  呈层间差异，不能重现旧实现的四层全零指纹。sampled candidate→resident
+  write cosine 约为 `0.999997–1.0`，applied/intended L2 ratio 约
+  `0.999994–1.000054`，所以 backward 修复和单步写回均在工作。
+- Norm evidence（observed）：critic pnorm 在 25k/50k/75k/90k 为
+  `733.80/1930.97/3046.30/3740.79`，matched FP8-direct 为
+  `495.37/756.40/958.63/1064.44`。独立反序列化 25k/50k checkpoint 得到四层
+  八 member 合并 physical norm `691.53→1905.03`；sampled 75k 为
+  `3022.31`，相对初始化合并 norm 约 `256` 已为 `11.8x`。member norm 在
+  50k 已分化到 `32.44–1511.29`，stored scale 为
+  `9.94e-5–4.42e-3`；75k sampled intended effective angular step 均值比
+  25k 低约 `5x`。
+- Interpretation / next gate：修复后的非零梯度没有自行消除 scale-gauge norm
+  runaway，反而使其比旧 zero-gradient resident 更快；当前差 reward 与快速
+  norm/scale 分化同步，但尚不能仅凭相关性宣称因果。建议的新独立 arm 是从头
+  运行 `scale-aware backward + fixed-initial anchor`，与本 run 和 matched
+  FP8-direct 做同 seed 对照。旧 fixed-anchor run 因 backward-invalid 不能替代
+  该实验。该 arm 尚未启动，等待用户决定。
+
+### `EXP-FP8-ONLINE-SCALED-BWD-FIXED-ANCHOR-S42-500K`
+
+- 状态：`running`；用户于 2026-09-03 17:15 Asia/Shanghai 明确选择从头在
+  GPU0 启动，17:16:25 实际启动。不是从 unanchored checkpoint 恢复，也不是
+  旧 backward-invalid fixed-anchor run 的续跑。
+- 目的 / Idea：Idea 002；检验 scale-aware repaired backward 恢复真实梯度后，
+  fixed-initial anchor 是否通过消除八个 resident member 的 scale-gauge norm
+  runaway 恢复 angular motion 与 return。
+- 代码：`/home/caiyuliang/BRC_FP8_blackwell_fp8`，分支
+  `codex/blackwell-fp8-direct`，HEAD
+  `5500f6a50fe92f17cf9c5e78e7f4076e00e0b958` 加未提交 repaired-backward、
+  fixed-anchor、测试与研究记录；实际 dirty source snapshot 由 recorder 保存。
+- 协议：Dogs、seed42、从随机初始化开始、GPU0、width4096、batch1024、
+  2 updates/env step、500k；online `fp8_resident`、scale-aware E5M2 custom
+  backward、`fp8_resident_canonicalization=true`、八个 fixed-initial anchor，
+  target `fp8_direct` + FP32 persistent parameters，FP32 AdamW moments；25k
+  eval/tensor stats、50k analysis、100k recovery。
+- 比较：同 seed repaired-only `EXP-FP8-ONLINE-SCALED-BWD-S42-500K` 与
+  matched FP8-direct `EXP-FP8-TARGET-FWD-S42`。旧
+  `EXP-FP8-ONLINE-FIXED-ANCHOR-S42-R500K` 只作为 backward-invalid negative
+  control，不作为该组合方法的结果。
+- 运行：tmux `brc_fp8_scaled_backward_fixed_anchor_s42_gpu0`，PID `2656519`；
+  命令 `scripts/run_dogs_online_fp8_resident_fixed_anchor.sh 0 42 500000`。run
+  `brc_dmc_dogs_online_fp8_resident_fixed_anchor_s42-20260903-171625`，
+  [W&B `p7osuon0`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/p7osuon0)。
+- 决策指标：八个 serialized `anchor_norm_ratio`、四层 kernel gradient
+  L2/zero fraction、actor gradient、critic pnorm、eval return、NaN/Inf；不使用
+  wall clock/throughput 作为方法证据。
+- 启动验收（observed）：tmux/PID 与 GPU0 compute process 存在，run directory
+  和 W&B 已建立；config 为 seed42、`max_steps=500000`、`resume_from=''`、
+  `resolved_online_fp8_backward=scale_aware_e5m2_delayed_amax_custom_vjp`、
+  `resolved_online_fp8_canonicalization=fixed_initial_kernel_norm_with_paired_bias`、
+  target `fp8_direct`、无 FP32 weight master。`initialization_finished` 于启动后
+  12.38s 写入，验收时已到 env step 2000，未见立即错误。
+- 100k 因果读数（observed）：eval return `134.4419`，对同 seed
+  repaired-only `157.9756`、matched FP8-direct `340.6060`；对应 critic pnorm
+  `519.075/4171.116/1129.211`，三者 NaN/Inf 均为 `0/0`。组合方法没有恢复
+  reward，且低于 repaired-only；单 seed 不能给出最终统计显著性，但差距已经
+  足以否定“修 backward + 固定初始化半径必然关闭早期 gap”的机制预期。
+- 机制排除（observed）：100k serialized checkpoint 的 NumPy float64 独立审计
+  给出 8/8 `anchor_norm_ratio=0.9999815–1.0004089`；四层 kernel gradient L2
+  为 `0.002290/0.007208/0.000322/0.007310`，均非零。最后一次写回的
+  expected-Q MAE `1.7975e-5`、critic-loss relative error `9.2689e-8`、JS
+  divergence `1.0268e-8`，所以不是 anchor recurrence、旧全零 backward、
+  非有限值或单步函数突变。
+- 剩余机制（observed + inference）：100k 写回的 8-member code unchanged
+  fraction 均值 `0.80694`（范围 `0.38953–0.94172`），但 physical exact-zero
+  swallowed fraction 仅 `3.12e-4`，因为 global scale 仍会移动。fixed run
+  50k→100k 的多个 kernel code-direction cosine 为 `0.0458–0.3246`，表明并非
+  整体冻结；相反 repaired-only 100k→150k 多数 cosine 为
+  `0.999999–1.0`，与 scale runaway 后方向冻结一致。fixed anchor 把每 member
+  固定在初始 norm `90.51`，而 direct 100k 四层 combined-member norm 已为
+  `241.87–669.69`。因此 hard initial-radius projection 虽对 LayerNorm 前向近似
+  gauge-invariant，却不保持 AdamW 的参数化与有效角学习率；当前证据把主因上移
+  到无 FP32 master 的逐步 E4M3 参数转移/优化轨迹。online current-amax 与
+  direct delayed-amax 仍是下一因果控制需要消除的混杂。
+- Continued exclusion checks（observed）：同一 100k serialized physical
+  weights 与保留 probe batch 上，resident-vs-FP32 loss relative error
+  `6.54e-6`，四层 kernel-gradient cosine `0.98384–0.98892`、L2 ratio
+  `0.88758–0.92540`，`dQ/da` cosine/L2 ratio
+  `0.9999979/0.9999878`。100k E5M2 current/history amax ratio 约
+  `0.36–0.44`，不是旧 raw-FP8 backward 的全零 cliff。fixed online-target
+  kernel cosine `0.9999933–0.9999999`、relative gap
+  `0.000552–0.003675`；8 个 resident matrices 的
+  `code→physical→code` 共 `134,217,728` 元素 mismatch 为 0。
+- Optimizer geometry（observed + inference）：fixed100 Adam 一阶 moment 与
+  weight cosine 量级仅 `6.9e-5–1.3e-3`，排除“大量陈旧径向 momentum 每步被
+  丢掉”；由现有 write scalars 独立重建的 intended/applied tangential cosine
+  在数值误差内为 1。更窄的解释是 hard initial-radius projection 改写了
+  LayerNorm 前 scale-gauge 上的 Adam 有效角步长：direct 100k 四层
+  combined-member norm 已自然增长至 `241.87–669.69`，fixed 始终约 `128`，
+  因而取消了健康 control 中随 norm growth 发生的隐式角学习率退火。该解释
+  针对 fixed arm；masterless E4M3 累计路径与 current/delayed-amax 混杂仍需
+  matched FP32-master/current-amax control 才能完全分离。
+- 进程处置：本轮用户只要求判断效果；未停止或重启任何实验。记录时 GPU0
+  tmux/PID 仍在正常运行，后续仍由用户手动决定是否停止。
+
+### `EXP-FP8-ONLINE-CURRENT-MASTER-S42-150K`
+
+- 状态：`running`；2026-09-03 18:47:47 Asia/Shanghai 在 GPU1 从随机初始化
+  启动，计划运行至 150k；25k 首个闭环点与 tensor stats 已完成。
+- 目的 / Idea：Idea 002 的单因素隔离。在线四个 residual Dense 保留与
+  repaired resident 相同的 activation/weight current-amax E4M3 前向、FP32
+  accumulate 和 scale-aware E5M2 custom backward，但参数与 AdamW moments
+  持久为 FP32；不做 resident 写回或 fixed anchor。若它恢复 matched direct
+  曲线，则剩余主因位于 masterless E4M3 参数转移/优化轨迹；若仍接近 resident，
+  则 current-amax compute policy 本身是主要嫌疑。
+- 协议：Dogs、seed42、width4096、batch1024、2 updates/env step、target
+  `fp8_direct` + FP32 parameters、paper alignment/reward-mean bootstrap、25k
+  eval/tensor stats、50k analysis、100k recovery，与现有三条比较曲线一致。
+- 运行：tmux `brc_fp8_current_master_s42_gpu1`，启动 PID `2931188`；run
+  `brc_dmc_dogs_online_fp8_current_master_s42-20260903-184747`，
+  [W&B `vgd8apty`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/vgd8apty)。
+- 启动前验证（observed）：定向 unittest 通过；四层初始 current-master 与
+  resident logits 逐元素相同；online params/AdamW 浮点 state 全为 FP32；连续
+  三次 learner update 后参数变化且四层 output-gradient history 推进。启动脚本
+  `bash -n`、Python 编译和 `git diff --check` 均通过。
+- 启动验收（observed）：tmux/PID、W&B 与本地 run directory 已建立；命令解析为
+  `--critic_precision=fp8_current_master --target_critic_precision=fp8_direct`
+  和 `--fp8_resident_canonicalization=false`。
+- 25k readout（observed）：mean return `49.53`，对 repaired resident
+  `45.94`、fixed `34.78`、matched direct `19.92`；该早期点没有复现 resident
+  reward deficit，但曲线尚未拉开，不能单独作为最终归因。critic pnorm
+  `472.85`，接近 direct 的 `495.37`，而 repaired/fixed 为 `733.80/359.29`。
+  serialized checkpoint 的四层 combined-member FP64 norms 为
+  `209.31/272.91/145.85/152.09`，也接近 direct 的
+  `213.62/302.42/154.87/154.93`，明显不同于 repaired 的
+  `555.28/328.57/206.87/138.30` 与 fixed 的约 `128`。
+- 25k operator health（observed）：四层 kernel-gradient L2 为
+  `0.02531/0.01065/0.000415/0.009906`，全部非零；update NaN/Inf 为 `0/0`，
+  291 条 tensor stats 与 analysis checkpoint 正常写入。继续以 50k/100k
+  return 是否贴近 direct 为主因果门。
+- Aligned deterministic probe（observed）：width16 的 current-master 与
+  resident 从完全相同的 online physical params、target state 和零 Adam state
+  出发。一次更新后 resident write 产生最大 kernel relative L2 `0.000897`，但
+  FP8 logits 仍逐元素相同；10 次后两者为 `0.008423/0.027712`。这直接验证
+  off-lattice FP32 位置的逐步丢失能在局部 forward 一致时累计成函数轨迹分叉。
+  原始数值保存在 `development_records/current_master_aligned_pair_probe.json`。
+- 50k readout（observed）：return `113.17`，达到 direct `120.40` 的 `94.0%`，
+  并高于 repaired/fixed `101.41/87.12`。四任务 current/direct 分别为
+  `261.89/73.86/60.67/56.28` 与 `271.14/77.23/65.91/67.32`，没有由单任务
+  抵消造成的假接近。critic pnorm 为 `720.93`，direct/repaired/fixed 为
+  `756.40/1930.97/412.72`；四层 physical kernel norms current
+  `391.76/412.33/197.91/180.21` 也贴近 direct
+  `385.68/452.56/217.95/196.32`，远离 repaired
+  `1680.26/744.36/482.33/138.30` 和 fixed 的约 `128`。update NaN/Inf
+  `0/0`，tensor stats/checkpoint 正常。50k 已支持 masterless E4M3 write 是
+  主要分叉源；75k/100k 用于检查该结论在曲线明显拉开后是否保持。
+- Same-weight compute probe（observed）：在健康 direct 500k 的相同 FP32
+  weights 与 256-sample probe 上，将保存的 delayed-amax 与 current-amax 直接
+  比较，logits relative L2 `0.004814`、expected-Q MAE `0.003916`；四层
+  kernel VJP cosine `0.97565–0.99818`、L2 ratio `0.99079–1.00024`，zero
+  fraction 也近似一致。current/delayed 是真实但次级的累计轨迹混杂，不是
+  resident 量级的局部算子崩坏；原始值保存于
+  `development_records/current_vs_delayed_direct500_probe.json`。
+- 75k readout（observed）：current-master return `178.43`，比
+  repaired/fixed `129.44/129.26` 高 `37.9%/38.0%`，但仍低于 direct
+  `220.44` 约 `19.1%`。四任务 current 均逐项高于两条 resident arm，排除
+  单任务均值抵消；相对 direct 的主要缺口来自 walk/trot。该点表明保留 FP32
+  master 已消除 resident gap 的主要部分，但 current/delayed compute 小差异和
+  单 seed 闭环敏感性仍可能贡献剩余差距。100k 是最终主判据。
+- 100k causal result（observed）：current-master return `244.89`，对
+  repaired/fixed/direct `157.98/134.44/340.61`；相对两条 resident arm 提升
+  `55.0%/82.2%`，但仍比 direct 低 `28.1%`。四任务 current 为
+  `597.35/156.11/109.37/116.74`，均高于 repaired
+  `393.30/68.02/85.12/85.46` 和 fixed
+  `293.34/96.43/83.98/64.01`；direct 的额外优势主要在 walk/trot。
+- 100k internal trajectory（observed）：current/direct/repaired/fixed critic
+  pnorm 为 `1090.48/1129.21/4171.12/519.08`；四层 physical norms current
+  `668.29/616.10/277.23/216.72` 对 direct
+  `669.69/642.33/316.31/241.87`，而 repaired 为
+  `3543.41/1375.18/1654.27/138.65`、fixed 全部约 `128`。5k–100k 全段
+  critic-pnorm SMAPE：current 对 direct `3.63%`，对 repaired/fixed
+  `77.11%/47.97%`；Q-prediction/actor-pnorm SMAPE 对 direct 也最低
+  (`3.77%/6.43%`)。四层 current gradient 全部非零，形态与 direct 同量级；
+  update NaN/Inf `0/0`，analysis/recovery checkpoint 均成功。
+- Causal decision：masterless resident write 每步丢失 off-lattice FP32 参数位置，
+  是 fixed/repaired reward 不升的确定且大幅因素；unanchored 的 scale runaway/
+  角步冻结和 fixed anchor 的过强投影/角学习率失配是该状态替换的两种不同后果。
+  但 current-master 仍未达到 delayed-amax direct，因此 current/delayed scaling
+  的小算子差异经 RL 闭环累积是实质性第二因素。不能再把全部 gap 归给 anchor
+  或全部归给单步写回。run 继续到 150k，不需要为当前因果结论等待结束。
+
+### `EXP-FP8-ONLINE-CARRY-S42-SMOKE-5K`
+
+- 状态：`completed`；2026-09-04 02:33:55 与 02:41:34 Asia/Shanghai 在
+  空闲 GPU1 以独立 tmux 会话从全新随机初始化完成。两次均为本地记录
+  （`BRC_LOG_TO_WANDB=false`），没有向 W&B 上传；smoke 与正式 run 使用
+  不同目录，正式 run 不 resume。
+- 目的 / Idea：Idea 002 的 CARRY-FP8 工程门。持久 online resident 状态为
+  `Theta=s(C+R/16)`，其中主码 `C` 与 carry `R` 都是 E4M3、共享现有
+  current-amax FP32 scale；forward/backward 只使用 `sC`，AdamW 和 target
+  EMA 使用临时 logical reconstruction。主比较仍是 current-amax FP32-master。
+- 代码：`/home/caiyuliang/BRC_FP8_blackwell_fp8`，分支
+  `codex/blackwell-fp8-direct`，HEAD `5500f6a50fe92f17cf9c5e78e7f4076e00e0b958`
+  加未提交 CARRY-FP8 和此前未提交研究改动；无 commit/push。
+- 协议：Dogs、seed42、width4096、batch1024、2 updates/env step、5k env
+  steps、online `fp8_resident` + scale-aware backward + carry、fixed anchor
+  明确关闭、target `fp8_direct` + FP32 persistent parameters、paper alignment
+  与 reward-mean bootstrap。tensor/analysis/recovery cadence 在 5k 触发。
+- 启动前验收（observed）：CPU `tests.test_fp8` 为 `35/35`，完整
+  `unittest discover -s tests` 为 `63/63`；GPU1 上 7 项 carry 核心单测为
+  `7/7`。脚本 `bash -n`、Python compile 和 `git diff --check` 均通过。
+  GPU1/2 启动前显存均为 `3 MiB`，未复用或停止任何现有实验。
+- 命令：首次为
+  `BRC_LOG_TO_WANDB=false scripts/run_dogs_online_fp8_resident_carry.sh 1 42 5000`；
+  相邻步复核为
+  `BRC_LOG_TO_WANDB=false BRC_TENSOR_STATS_INTERVAL=1 BRC_ANALYSIS_CHECKPOINT_INTERVAL=5001 BRC_RECOVERY_CHECKPOINT_INTERVAL=5001 scripts/run_dogs_online_fp8_resident_carry.sh 1 42 5001`。
+- 工程门：四层 gradient 非零；main/carry dtype 均 E4M3；carry saturation
+  为 0；logical reconstruction error 小于 main-only；无 NaN/Inf；analysis 与
+  recovery checkpoint 可读且 carry 可恢复；随后才启动全新 500k run。
+- 结果（observed）：第二次 run 正常结束于 env `5001` / learner update `5`，
+  `run_finished` wall time `136.94 s`。两个 tensor 点共 `1466` 行，参数、梯度
+  与 update 的 NaN/Inf 均为 `0/0`；四层 resident kernel gradient L2 为
+  `7.8689/15.1037/9.0506/16.5058`，均非零；JAX peak bytes-in-use 约
+  `5.94 GiB`。main/carry dtype 均为 `float8_e4m3fn`，所有 8 个
+  layer/member 的 carry saturation fraction 为 `0`。
+- 边界读数（observed）：最初四次 learner update 的 candidate 恰已位于主
+  current-amax lattice（main write relative L2 仅 `2.33e-8–6.53e-8`），因此
+  carry 为零且 reduction ratio 约为 `1`；这不是非零主误差下的失败。加载
+  5001 recovery checkpoint 后，按已保存 RNG/replay/normalizer 取下一批并执行
+  两次 update，main-only relative L2 为 `0.008859–0.012317`，carry logical
+  relative L2 为 `0.000212–0.000311`，error reduction 为
+  `39.65x–43.32x`，saturation 为 `0`，四个含 ensemble 轴的 carry array 均约
+  `33.55M/33.55M` 非零元素；update NaN/Inf 为 `0/0`。这同时完成实际
+  width-4096 recovery restore 与 next-update 验证。
+- Checkpoint / 状态体积（observed）：analysis/recovery 分别为
+  `...-024134/checkpoints/analysis_step_000000005001` 与
+  `...-024134/checkpoints/recovery_step_000000005001`。四个 main kernel 和
+  carry 分别都是 `134,217,728` bytes，weight scale 合计 `32` bytes，新增
+  full-size FP32 carry 为 `0`。analysis `critic.msgpack` 为 `281,873,411`
+  bytes；与相同结构的 repaired resident `147,655,495` bytes 相比增加
+  `134,217,916` bytes（payload 增量恰为 `128 MiB`，其余为序列化开销）。
+
+### `EXP-FP8-ONLINE-CARRY-S42/S1-500K` (pre-barrier invalid controls)
+
+- 状态：`stopped; mechanism-invalid`；2026-09-04 02:47 Asia/Shanghai 在旧
+  smoke 工程门与
+  recovery-next-update 复核后，从两个全新目录并行启动，不从任何
+  smoke/naive/fixed checkpoint resume。W&B 初始化均成功。
+- 协议：Dogs、500k、start 5k、replay 1M、batch 1024、2 updates/env step、
+  width 4096、paper alignment、reward-mean bootstrap；online resident main
+  current-amax E4M3 + E4M3 carry + repaired scale-aware backward，fixed anchor
+  关闭；target `fp8_direct` 且参数/EMA 为 FP32；25k eval/tensor、50k analysis、
+  100k recovery。
+- Seed / resource：seed42 / GPU1 / tmux `brc_fp8_carry_s42_gpu1` / PID
+  `4112431` / W&B [`a4h7dp4d`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/a4h7dp4d)；
+  seed1 / GPU2 / tmux `brc_fp8_carry_s1_gpu2` / PID `4112436` / W&B
+  [`ddivbdzt`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/ddivbdzt)。
+  用户已于 2026-09-04 明确允许 W&B 遥测上传。
+- 命令：`scripts/run_dogs_online_fp8_resident_carry.sh 1 42 500000` 与
+  `scripts/run_dogs_online_fp8_resident_carry.sh 2 1 500000`。
+- 输出：`runs/DMC_DOGS/brc_dmc_dogs_online_fp8_resident_carry_e4m3_g16_s42`
+  与 `..._s1`；checkpoint 子目录均为各自 `checkpoints/`。
+- 启动验收（observed）：两条 config 均为 carry `true`、canonicalization
+  `false`、resolved state `carry_e4m3_shared_scale_gain16`、target
+  `fp8_direct`、resume 空、500k/25k/50k/100k cadence 正确。GPU UUID 与 PID
+  绑定已核验；seed42/seed1 在 env 5000 / update 3 的 critic loss 为
+  `12.6415/8.7781`、gradient norm 为 `19.5278/13.5810`，update NaN/Inf
+  均为 `0/0`，JAX peak bytes-in-use 均约 `5.12 GiB`。
+- 2026-09-04 02:51 progress snapshot（observed）：seed42 已到 env `8000` /
+  update `6003`，seed1 已到 env `7000` / update `4003`；最新 update NaN/Inf
+  均为 `0/0`，对应 `critic_pnorm=340.58/365.79`。两个 tmux、训练 PID 与
+  GPU1/GPU2 映射均仍存活。
+- 2026-09-04 03:36 health audit（observed）：两条 run 已到 env `68000` /
+  update `126003`，tmux/PID/GPU 均存活，最新 update NaN/Inf 均为 `0/0`，
+  peak JAX bytes-in-use 为 `11.15/11.02 GiB`；25k/50k analysis checkpoint
+  完整。因此运行时和数值稳定性本身正常。
+- CARRY mechanism failure（observed）：两种子在 25k 与 50k 的 8/8
+  layer/member carry 均为 E4M3 但 `zero_fraction=1`、`carry_prequant_absmax=0`、
+  saturation `0`；main/logical relative error 相同且仅为
+  `1.57e-8–7.09e-8`，reduction ratio 约 `1`，physical/logical norm 完全相同。
+  直接解码两个 50k `critic.msgpack` 再次确认四个含 ensemble 轴的 carry
+  array 各有 `33,554,432` 个元素且非零计数全部为 `0`，排除 tensor logger
+  误报。四层 gradient L2 在两个点仍全部非零，所以这不是旧的 zero-backward
+  failure，而是 carry 持久状态在真实长程训练中没有生效。
+- Trajectory evidence（observed）：seed42 的 25k/50k/68k critic pnorm 为
+  `782.90/1839.92/2605.80`，接近 repaired resident 的
+  `733.80/1930.97/2608.39`，远高于 current-master 的
+  `472.85/720.93/约851@65k`。25k/50k return 为 `47.22/80.02`，对 repaired
+  `45.94/101.41`、current-master `49.53/113.17`；早期 return 有随机性，不能
+  单独定性，但没有显示 CARRY 收益。seed1 的 25k/50k return 为
+  `30.44/84.02`，68k pnorm 已为 `3594.74`。
+- Health decision（inference）：工程进程仍健康，但预注册的 CARRY 重建门与
+  trajectory-preservation 假设已经失败；这两条 partial run 不能回答有效
+  CARRY-FP8 的 return 问题。按原计划应停止并修复机制，而不是继续用其作为
+  CARRY treatment；本次只读健康审计未擅自停止，等待用户决定。
+- 2026-09-04 03:49 root cause（observed）：最小 `4x4` 与 `4096x4096` 探针
+  都证明，当前 GPU JIT 会让同一 compiled graph 内 `float32(code)` 的消费
+  路径看到 FP8 cast 之前的 FP32 值；持久返回的 E4M3 code 本身仍真实量化。
+  因此 `candidate/s-float32(code)` 被编译成 0，carry 全零，同图内 main error
+  也被错误报告为约 `1e-8`。CPU JIT 与 GPU eager 正常。4096² plain probe
+  的 main relative error/nonzero carry/prequant absmax 为
+  `2.684e-8 / 0 / 0`；在 E4M3 code 上插入 `jax.lax.optimization_barrier`
+  后为 `0.0264938 / 16,777,205 / 255.995`。stop-gradient、bitcast detour、
+  FP32 candidate 侧 barrier 均无效。环境为 JAX/JAXLIB `0.6.0`、Flax
+  `0.10.4`、driver `580.95.05`、RTX PRO 6000 Blackwell SM 12.0。
+- 2026-09-04 03:51 live follow-up（observed）：两条 run 均已到 env `90000` /
+  update `170003`，PID/GPU 仍存活，update NaN/Inf 均为 `0/0`；critic pnorm
+  已到 `3421.95/4855.63`。75k 第三个 tensor 点再次给出 8/8
+  `carry_prequant_absmax=0` 和约 `1.81e-8–8.57e-8` 的伪 main relative error，
+  与最小 GPU-JIT reproduction 完全一致。
+- Root-cause decision（inference）：真实缺陷是量化器没有在 code cast 后建立
+  GPU-JIT 可观察边界；不是 replay、checkpoint、Actor metadata merge、carry
+  gain 或 Adam candidate 恰落 lattice。现有 same-graph write-fidelity 诊断同样
+  失真。修复必须在所有需要立即 widen 新 code 的路径放置 code-side barrier，
+  并新增 GPU-JIT materialization regression test 后从 fresh initialization
+  重跑；当前进程未因本次诊断被停止或修改。
+- 2026-09-04 04:22–04:28 corrective implementation（observed）：共享 E4M3
+  quantizer 已在 main code cast 后加入 `jax.lax.optimization_barrier`；独占 GPU
+  gate 进一步发现 carry 自身的直接 cast 也需要 barrier。两层持久化边界均修复
+  后，actual carry kernel 的 vmap+JIT regression 在 CPU/GPU1 均通过，并验证
+  same-graph main/logical reconstruction 与返回 main/carry code 第二次 dispatch
+  完全一致。4096² probe 的 main/carry relative error 为
+  `0.00122739/3.2394553e-5`，nonzero carry
+  `16,767,853/16,777,216`、saturation `0`。此前记录的 carry error
+  `3.598577e-8` 是未 barrier carry cast 的第二个伪读数，已废弃。完整 CPU
+  suite `64/64` 通过。config 新增 materialization 语义版本并拒绝修复前
+  resident checkpoint resume；launcher 支持 `BRC_RUN_TAG=jitbarrier_v1`。
+- 2026-09-04 04:24 invalid-run follow-up（observed）：100k tensor point 第四次
+  确认两 seed 的 8/8 carry 全零、prequant absmax `0`、reduction ratio `1`；
+  125k eval return 为 `163.17/159.64`。124k pnorm `4647.94/6863.59`，
+  NaN/Inf `0/0`，GPU 利用率约 `63%`。因此仍是运行健康但机制无效。四张卡
+  当前均被占用；共享卡上的 full-model probe 遇到 cuSolver 初始化失败或进程
+  终止，不能替代独占 GPU gate。
+- 2026-09-04 04:23 stop（observed）：用户授权后通过各 tmux pane `Ctrl-C`
+  优雅停止；seed42/seed1 终止于 env `136418/136339`、update
+  `262837/262679`。两条均写入 `run_interrupted` 和 `run_finished`；训练/W&B
+  PID 与 tmux 均退出，GPU1/GPU2 回到 `3 MiB`。目录和 100k recovery 保留为
+  pre-barrier negative controls，不允许恢复成 corrected treatment。
+- 预注册停止条件：只因 NaN/Inf、resident gradient 全零、持续非零 carry
+  saturation、dtype/restore 错误、nonzero main error 下 carry 无重建收益、
+  OOM 或进程故障停止；不因早期 return 偏低停止。IDs、PID、W&B URL 与状态
+  已记录；25k/50k/75k/100k 与最终读数待后续追加。
+
+### `EXP-FP8-ONLINE-CARRY-JITBARRIER-SMOKE-S42`
+
+- 状态：`completed; all mechanism and recovery gates passed`。GPU1 / tmux
+  `brc_fp8_carry_jitbarrier_smoke_s42_gpu1`，fresh run ID
+  `brc_dmc_dogs_online_fp8_resident_carry_e4m3_g16_smoke_jitbarrier_v1_s42-20260904-043900`。
+- 协议：与 formal 相同的 Dogs、width4096、batch1024、2 updates/step、online
+  resident main+carry E4M3、scale-aware backward、target FP8-direct；W&B 关闭，
+  tensor interval 1，analysis/recovery 在 5001。命令为
+  `BRC_RUN_TAG=jitbarrier_v1 BRC_LOG_TO_WANDB=false BRC_TENSOR_STATS_INTERVAL=1 BRC_ANALYSIS_CHECKPOINT_INTERVAL=5001 BRC_RECOVERY_CHECKPOINT_INTERVAL=5001 scripts/run_dogs_online_fp8_resident_carry.sh 1 42 5001`。
+- 结果（observed）：env `5001` / update `5` 正常结束，wall `127.24 s`。
+  8/8 carry 为 E4M3 且 zero fraction `0.0001186–0.0001390`；main/logical
+  relative error `0.02645–0.02654 / 0.000646–0.000756`，改善
+  `35.0x–40.9x`；saturation `0`。四层 resident gradient L2
+  `0.1475/0.3902/0.1965/0.3765`；733 条 tensor stats NaN/Inf 总数 `0/0`。
+- Recovery（observed）：从完整 5001 recovery 在 tmux
+  `brc_fp8_carry_jitbarrier_resume_s42_gpu1` 恢复到 env `5002` / update `7`；
+  `resume_reset`、`resumed=true`、first update、analysis/recovery COMPLETE 和
+  `run_finished` 均写入。5002 carry 仍非零，error reduction `40.8x–48.1x`，
+  saturation/733 条 NaN/Inf 为 `0/0`。manifest 包含 optimizer/replay，main/
+  carry payload 各 `134,217,728` bytes、FP32 carry `0`。
+
+### `EXP-FP8-ONLINE-CARRY-JITBARRIER-S42/S1-500K`
+
+- 状态：`running`；2026-09-04 04:48:50 Asia/Shanghai 并行 fresh 启动。只在上述 CPU/GPU、width4096、
+  Dogs 与 recovery gates 全部通过后，从 fresh initialization 启动；不恢复
+  pre-barrier negative-control 或 smoke checkpoint。
+- 计划 run ID：
+  `brc_dmc_dogs_online_fp8_resident_carry_e4m3_g16_jitbarrier_v1_s42` 与
+  `brc_dmc_dogs_online_fp8_resident_carry_e4m3_g16_jitbarrier_v1_s1`；tmux 为
+  `brc_fp8_carry_jitbarrier_s42_gpu1` / `brc_fp8_carry_jitbarrier_s1_gpu2`。
+- 协议：Dogs 500k、start5k、replay1M、batch1024、2 updates/step、width4096、
+  paper alignment/reward-mean bootstrap；online resident main+carry E4M3、
+  carry gain16、fixed anchor off、scale-aware backward；target FP8-direct with
+  FP32 parameters；eval/tensor/analysis/recovery cadence `25k/25k/50k/100k`。
+- 命令：`BRC_RUN_TAG=jitbarrier_v1 BRC_LOG_TO_WANDB=true scripts/run_dogs_online_fp8_resident_carry.sh 1 42 500000`
+  与 GPU2/seed1 对应命令。W&B 上传已获用户授权。必须核验 fresh config 中
+  materialization semantic、resume 为空、tmux/PID/GPU UUID/W&B URL，并在
+  5k train metrics 与 25k tensor gate 继续检查 finite gradient 和 nonzero carry。
+- 实际资源（observed）：seed42 / GPU1 / tmux
+  `brc_fp8_carry_jitbarrier_s42_gpu1` / PID `199383` / W&B
+  [`7mdayzva`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/7mdayzva)；
+  seed1 / GPU2 / tmux `brc_fp8_carry_jitbarrier_s1_gpu2` / PID `199386` /
+  W&B [`hxf61n84`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/hxf61n84)。
+  两条 config 均确认 `resume_from: ''`、materialization v1、500k、carry true、
+  fixed anchor false、target FP8-direct 和 `25k/50k/100k` cadence；W&B events
+  均为 enabled/initialized true。
+- 启动健康门（observed）：两条均通过 initialization 与 env `5000` 首次更新，
+  并继续到 env `9000` / update `8003`。seed42/seed1 的 9k critic loss
+  `0.01979/0.02648`、gnorm `0.02754/0.03099`、pnorm `326.61/345.78`，更新
+  NaN/Inf 都是 `0/0`；吞吐 `106.83/106.91 transitions/s`。tmux、PID 与
+  GPU1/GPU2 映射持续存活。
+- 25k carry 机制门（observed，2026-09-04 05:18 Asia/Shanghai）：两条均生成
+  `733` 条 tensor stats 和完整 analysis checkpoint；各自 8/8 carry code 张量
+  非零。seed42/seed1 carry zero fraction 分别为
+  `5.69e-5–1.23e-4` / `5.38e-5–9.81e-5`；main-write relative L2 为
+  `0.02574–0.03941` / `0.02639–0.03751`，加 carry 后 logical reconstruction
+  relative L2 降至 `5.77e-5–3.33e-4` / `1.15e-4–2.43e-4`，对应误差改善
+  `103.18x–582.45x` / `108.47x–322.27x`。16 个 layer-member 的 carry
+  saturation 全为 `0`，两组 733 条记录的 NaN/Inf 总数均为 `0/0`。
+- 当前运行状态（observed，2026-09-04 05:18 Asia/Shanghai）：两条均推进到
+  env `43000` / update `76003`，累计 update NaN/Inf 均为 `0/0`，吞吐约
+  `105.62/104.74 transitions/s`；tmux、PID `199383/199386` 与 GPU1/GPU2
+  映射仍存活。25k eval return 为 seed42 `72.14`、seed1 `32.39`；这只是首次
+  单 seed 早期学习点，不作为最终效果结论。
+- 75k follow-up（observed，2026-09-04 05:41 Asia/Shanghai）：两条均到 env
+  `75000` / update `140003`，eval return 轨迹分别为 seed42
+  `72.14→125.16→185.73`、seed1 `32.39→68.43→189.56`；四个 Dogs 子任务在
+  两个 seed 的 75k eval 中都高于各自 25k。25k/50k/75k 的所有 carry 均持续
+  非零，75k zero fraction 为 `2.27e-5–1.43e-4`，logical reconstruction
+  relative L2 为 `5.88e-5–6.63e-4`，误差改善 `42.85x–668.98x`，carry
+  saturation 和每次 733 条 tensor stats 的 NaN/Inf 都是 `0`。seed42 75k
+  critic pnorm `1212.55`，高于匹配 target-FP8-direct/FP32-storage control 的
+  `958.63`，但远低于无 carry repaired-resident 的 `3046.30`；75k return
+  `185.73` 也已进入 direct/current-master 对照的同一早期学习量级
+  (`220.44/178.43`)，并高于无 carry repaired-resident 的 `129.44`。
+  这是“已经开始持续学习”的强早期证据，但不是 500k 最终效果结论。tmux、
+  PID `199383/199386` 和 GPU1/GPU2 映射在 05:41 仍正常，累计 update
+  NaN/Inf 为 `0/0`。
+- seed42 停止与成熟结果（observed，2026-09-04 10:02 Asia/Shanghai）：按用户
+  要求为组合实验释放 GPU1，经 tmux Ctrl-C 优雅停止于 env `454409` / update
+  `898819`；事件流完整写入 `run_interrupted(KeyboardInterrupt)` 和
+  `run_finished`。停止前 450k eval return/best 为 `832.7369`，四任务为
+  `963.91/962.28/891.17/513.59`；450k 的 8/8 carry 仍非零，重建误差改善
+  `66.64x–1130.49x`，carry saturation 与 733 条 tensor stats NaN/Inf 均为 0。
+  该 run 因主动替换未到 500k，不能记为 completed，但其 18 个 eval 和 450k
+  analysis checkpoint 保留为有效部分结果。同期 seed1 未受停止操作影响，后于
+  10:44 正常完成 500k / update 990003，final/best/tail-three return
+  `782.8582/807.5967/793.2795`；完整 500k analysis/recovery checkpoints、
+  `final_checkpoints_finished` 与 `run_finished` 均已核验，累计 update NaN/Inf
+  `0/0`。
+
+### `EXP-FP8-ONLINE-CARRY-TARGET-LAG-S42-500K`
+
+- 状态：`running`；用户于 2026-09-04 10:01 Asia/Shanghai 明确要求停止当前
+  corrected-carry seed42，并在释放的 GPU1 上以 seed42 从头启动本组合。
+- 目的 / Idea：检验已验证的 online CARRY-FP8 与既有 target lag-coded FP8
+  能否组合。四个 online residual-Dense kernel 以 main/carry E4M3 + FP32 scale
+  常驻，四个 target residual-Dense kernel 以相对 online logical parameter 的
+  lag E4M3 + FP32 scale 常驻；optimizer moments、非覆盖参数及必要元数据仍为
+  FP32，因此这里的“整体 FP8 critic”专指 online/target 两侧的大残差 kernel
+  都不保留 FP32 weight master，而不是声称 Critic 每个标量均为 FP8。
+- 代码：`/home/caiyuliang/BRC_FP8_blackwell_fp8`，分支
+  `codex/blackwell-fp8-direct`，HEAD
+  `5500f6a50fe92f17cf9c5e78e7f4076e00e0b958` 加当前未提交 carry 修复、研究改动
+  和 launcher 的 `BRC_TARGET_CRITIC_PRECISION` 参数。
+- 协议：fresh Dogs seed42、500k、start5k、replay1M、batch1024、2 updates/step、
+  width4096、paper alignment/reward-mean bootstrap；online `fp8_resident` + carry
+  gain16 + scale-aware backward，target `fp8_lag`；eval/tensor/analysis/recovery
+  cadence `25k/25k/50k/100k`，W&B 开启。不从 target-FP8-direct run 恢复。
+- 运行计划：GPU1；tmux `brc_fp8_carry_target_lag_s42_gpu1`；run/W&B name
+  `brc_dmc_dogs_online_fp8_resident_carry_e4m3_g16_jitbarrier_v1_target_lag_s42`；
+  命令为 `BRC_RUN_TAG=jitbarrier_v1_target_lag BRC_TARGET_CRITIC_PRECISION=fp8_lag BRC_LOG_TO_WANDB=true scripts/run_dogs_online_fp8_resident_carry.sh 1 42 500000`。
+- 对照：同 seed 的当前 CARRY + target FP8-direct run（停止边界待记录），以及已完成
+  online FP8-direct + target lag run `nu2d5b90`。两者与本组合分别隔离 target lag
+  和 online carry 的增量，但最终解释仍需核对运行时 dirty source snapshot。
+- 验收：先以 W&B 关闭的 5001-step fresh smoke 验证首次更新、online carry、target
+  lag codes/scale、EMA 诊断和 checkpoint 均有限非空；正式 run 在 25k 检查两套
+  持久状态及首次 eval。除 NaN/Inf、持久状态退化、OOM 或运行故障外不按早期
+  return 自动停止。
+- Smoke（observed）：fresh run
+  `...smoke_jitbarrier_v1_target_lag_s42-20260904-101452` 在 GPU1 正常完成 env
+  `5001` / update `5`，写入 `run_finished` 及 COMPLETE analysis/recovery
+  checkpoints。925 条机制统计中 online carry 8/8 非零，main/logical relative
+  L2 为 `0.02645–0.02659 / 0.000619–0.000653`，改善 `40.53x–42.79x`，
+  saturation 0；target lag codes 8/8 非零，zero/underflow fraction 约
+  `1.19e-7–7.75e-7`。训练 loss、梯度与 update NaN/Inf 均有限/为 0。
+  首步 lag quantization relative error 为 `2.30%–2.61%`，相对很小的
+  `tau=0.005` intended EMA step 放大为 update relative error `4.58–5.20`；这是
+  后续 25k 必须监测的数值风险，而不是启动前隐藏掉的通过指标。
+- Smoke 诊断修复（observed）：online function-write JS 的 3 个 Inf 来自两个
+  极小 softmax 概率求 midpoint 时下溢为 0；不在训练路径，其他状态有限。正式
+  启动前改为对 log 输入使用 dtype tiny 下界，并新增 midpoint-underflow JIT
+  regression；目标测试 `1/1`、launcher `bash -n` 和 `git diff --check` 通过。
+- 正式启动（observed）：2026-09-04 10:32:00 Asia/Shanghai 在 GPU1 fresh
+  启动；tmux `brc_fp8_carry_target_lag_s42_gpu1`，PID `1363708`，W&B
+  [`5o2266m9`](https://wandb.ai/cai200661-sun-yat/uncategorized/runs/5o2266m9)。
+  config 确认 `resume_from: ''`、online carry、target `fp8_lag`、materialization
+  v1 和 500k/cadence；W&B 与模型初始化、env 5000 首次更新均完成。10:43 已到
+  env `13000` / update `16003`，critic loss/gnorm/pnorm
+  `2.6929/1.3367/360.02`，累计 update NaN/Inf `0/0`；首个正式机制/eval 门为
+  25k。
+- 25k 机制/学习门（observed）：eval return `58.0742`（四任务
+  `146.287/24.977/30.956/30.076`），与同 seed corrected-carry / 既有 standalone
+  target-lag 的 25k `72.14/76.99` 同属早期学习量级，尚不能下最终结论。925 条
+  tensor stats 全部 NaN/Inf `0/0`。online carry 8/8 非零，zero fraction
+  `2.99e-5–1.48e-4`，main/logical relative L2
+  `0.02613–0.03858 / 8.27e-5–1.65e-4`，重建误差改善
+  `199.80x–430.67x`，saturation 0；target lag 8/8 非零，code zero fraction
+  `2.68e-6–6.66e-5`、lag quantization relative error `0.00845–0.02728`。
+  target 的相对 intended EMA update error 仍为 `1.68–5.43`，applied/intended
+  ratio `1.44–4.66`、cosine `-0.830–0.857`，所以继续以 50k/75k 判断这些逐步
+  噪声能否在闭环中平均掉；当前没有数值或机制退化理由提前停止。
 
 ## 更新规则
 

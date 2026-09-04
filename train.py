@@ -42,8 +42,20 @@ flags.DEFINE_boolean('render', True, 'Whether to log evaluation videos.')
 flags.DEFINE_integer('updates_per_step', 2, 'Number of updates per environment step.')
 flags.DEFINE_integer('width_critic', 4096, 'Width of the critic network.')
 flags.DEFINE_enum(
-    'critic_precision', 'fp32', ['fp32', 'fp8_direct', 'fp8_resident'],
+    'critic_precision', 'fp32',
+    ['fp32', 'fp8_direct', 'fp8_resident', 'fp8_current_master'],
     'Precision used by the online critic residual-block Dense layers.',
+)
+flags.DEFINE_boolean(
+    'fp8_resident_canonicalization',
+    False,
+    'Anchor each online resident kernel to its fixed initialization '
+    'Frobenius norm and scale the paired bias by the same factor.',
+)
+flags.DEFINE_boolean(
+    'fp8_resident_carry',
+    False,
+    'Persist one shared-scale E4M3 carry code per resident kernel element.',
 )
 flags.DEFINE_enum(
     'target_critic_precision', 'fp32',
@@ -53,7 +65,7 @@ flags.DEFINE_enum(
 )
 flags.DEFINE_integer(
     'fp8_amax_history_length', 1024,
-    'fp8_direct per-tensor amax history length.',
+    'FP8-direct and resident-backward per-tensor amax history length.',
 )
 flags.DEFINE_boolean(
     'paper_alignment', False,
@@ -167,6 +179,26 @@ def main(_):
         raise ValueError('batch_size, max_steps, and replay_buffer_size must be positive')
     if FLAGS.fp8_amax_history_length <= 0:
         raise ValueError('--fp8_amax_history_length must be positive')
+    if (
+        FLAGS.fp8_resident_canonicalization
+        and FLAGS.critic_precision != 'fp8_resident'
+    ):
+        raise ValueError(
+            '--fp8_resident_canonicalization requires '
+            '--critic_precision=fp8_resident'
+        )
+    if FLAGS.fp8_resident_carry and FLAGS.critic_precision != 'fp8_resident':
+        raise ValueError(
+            '--fp8_resident_carry requires --critic_precision=fp8_resident'
+        )
+    if (
+        FLAGS.fp8_resident_carry
+        and FLAGS.fp8_resident_canonicalization
+    ):
+        raise ValueError(
+            '--fp8_resident_carry requires '
+            '--fp8_resident_canonicalization=false'
+        )
 
     resolved_alignment = resolve_paper_alignment(
         FLAGS.paper_alignment,
@@ -175,11 +207,20 @@ def main(_):
         FLAGS.entropy_correction,
     )
     config = FLAGS.flag_values_dict()
+    config.update({
+        'carry_gain': 16.0,
+        'carry_dtype': 'float8_e4m3fn',
+        'resolved_fp8_code_materialization': (
+            'optimization_barrier_after_e4m3_cast_v1'
+        ),
+    })
     config.update({f'resolved_{key}': value for key, value in resolved_alignment.items()})
     config.update({
         'resolved_online_fp8_compute_scope': (
             'residual_dense_kernels'
-            if FLAGS.critic_precision in ('fp8_direct', 'fp8_resident')
+            if FLAGS.critic_precision in (
+                'fp8_direct', 'fp8_resident', 'fp8_current_master'
+            )
             else 'none'
         ),
         'resolved_online_fp8_storage_scope': (
@@ -188,13 +229,28 @@ def main(_):
             else 'none'
         ),
         'resolved_online_parameter_storage': (
-            'e4m3_residual_dense_kernels_otherwise_fp32'
+            (
+                'e4m3_main_and_e4m3_carry_residual_dense_kernels_otherwise_fp32'
+                if FLAGS.fp8_resident_carry
+                else 'e4m3_residual_dense_kernels_otherwise_fp32'
+            )
             if FLAGS.critic_precision == 'fp8_resident'
             else 'fp32_all_parameters'
         ),
+        'resolved_fp8_resident_state': (
+            (
+                'carry_e4m3_shared_scale_gain16'
+                if FLAGS.fp8_resident_carry
+                else 'main_e4m3_shared_scale'
+            )
+            if FLAGS.critic_precision == 'fp8_resident'
+            else 'disabled'
+        ),
         'resolved_online_fp8_weight_scaling': (
             'dynamic_current_amax_per_tensor'
-            if FLAGS.critic_precision == 'fp8_resident'
+            if FLAGS.critic_precision in (
+                'fp8_resident', 'fp8_current_master'
+            )
             else (
                 'delayed_amax_history_per_tensor'
                 if FLAGS.critic_precision == 'fp8_direct'
@@ -207,6 +263,22 @@ def main(_):
             else 'persistent_fp32_parameters'
         ),
         'resolved_online_optimizer_state': 'fp32_adamw',
+        'resolved_online_fp8_backward': (
+            'scale_aware_e5m2_delayed_amax_custom_vjp'
+            if FLAGS.critic_precision in (
+                'fp8_resident', 'fp8_current_master'
+            )
+            else (
+                'flax_e5m2_delayed_amax_custom_vjp'
+                if FLAGS.critic_precision == 'fp8_direct'
+                else 'none'
+            )
+        ),
+        'resolved_online_fp8_canonicalization': (
+            'fixed_initial_kernel_norm_with_paired_bias'
+            if FLAGS.fp8_resident_canonicalization
+            else 'disabled'
+        ),
     })
     target_fp8_compute = FLAGS.target_critic_precision in (
         'fp8_direct', 'fp8_resident', 'fp8_lag'
@@ -362,6 +434,10 @@ def main(_):
             critic_precision=FLAGS.critic_precision,
             target_critic_precision=FLAGS.target_critic_precision,
             fp8_amax_history_length=FLAGS.fp8_amax_history_length,
+            fp8_resident_canonicalization=(
+                FLAGS.fp8_resident_canonicalization
+            ),
+            fp8_resident_carry=FLAGS.fp8_resident_carry,
         )
         resource_devices = tuple(jax.devices())
         replay_buffer = ParallelReplayBuffer(
@@ -550,6 +626,12 @@ def main(_):
                     'fp8_direct_enabled': float(FLAGS.critic_precision == 'fp8_direct'),
                     'fp8_resident_enabled': float(
                         FLAGS.critic_precision == 'fp8_resident'
+                    ),
+                    'fp8_resident_carry_enabled': float(
+                        FLAGS.fp8_resident_carry
+                    ),
+                    'fp8_current_master_enabled': float(
+                        FLAGS.critic_precision == 'fp8_current_master'
                     ),
                     'target_fp8_direct_enabled': float(
                         FLAGS.target_critic_precision == 'fp8_direct'

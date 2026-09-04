@@ -1,0 +1,119 @@
+{
+  "independent": {
+    "activation_scale": 0.5,
+    "batch_size": 256,
+    "cases": {
+      "0.001": {
+        "input_gradient": {
+          "fp32": {
+            "cosine_to_reference": 1.0,
+            "l2": 0.42223113235577564,
+            "l2_ratio_to_reference": 1.0,
+            "zero_fraction": 0.0
+          },
+          "fp8_direct": {
+            "cosine_to_reference": 0.998622477848598,
+            "l2": 0.42165070609558747,
+            "l2_ratio_to_reference": 0.998625335235349,
+            "zero_fraction": 0.0
+          },
+          "repaired_resident": {
+            "cosine_to_reference": 0.9986224778450122,
+            "l2": 0.4216506603075077,
+            "l2_ratio_to_reference": 0.9986252267921853,
+            "zero_fraction": 0.0
+          },
+          "resident_vs_direct": {
+            "cosine_to_reference": 0.9999999999999999,
+            "l2": 0.4216506603075077,
+            "l2_ratio_to_reference": 0.9999998914075582,
+            "zero_fraction": 0.0
+          }
+        },
+        "kernel_gradient": {
+          "fp32": {
+            "cosine_to_reference": 0.9999999999999998,
+            "l2": 1054.483506135305,
+            "l2_ratio_to_reference": 1.0,
+            "zero_fraction": 0.0
+          },
+          "fp8_direct": {
+            "cosine_to_reference": 0.9986096831132965,
+            "l2": 1053.0284088776752,
+            "l2_ratio_to_reference": 0.9986200853316684,
+            "zero_fraction": 0.0
+          },
+          "repaired_resident": {
+            "cosine_to_reference": 0.9986096831132965,
+            "l2": 1053.0284088776752,
+            "l2_ratio_to_reference": 0.9986200853316684,
+            "zero_fraction": 0.0
+          },
+          "resident_vs_direct": {
+            "cosine_to_reference": 1.0,
+            "l2": 1053.0284088776752,
+            "l2_ratio_to_reference": 1.0,
+            "zero_fraction": 0.0
+          }
+        }
+      },
+      "0.01": {
+        "input_gradient": {
+          "fp32": {
+            "cosine_to_reference": 1.0000000000000002,
+            "l2": 4.235436386448109,
+            "l2_ratio_to_reference": 1.0,
+            "zero_fraction": 0.0
+          },
+          "fp8_direct": {
+            "cosine_to_reference": 0.998606811147947,
+            "l2": 4.230189717742154,
+            "l2_ratio_to_reference": 0.9987612448335329,
+            "zero_fraction": 0.0
+          },
+          "repaired_resident": {
+            "cosine_to_reference": 0.9986068111545024,
+            "l2": 4.230189374555824,
+            "l2_ratio_to_reference": 0.9987611638061491,
+            "zero_fraction": 0.0
+          },
+          "resident_vs_direct": {
+            "cosine_to_reference": 0.9999999999999996,
+            "l2": 4.230189374555824,
+            "l2_ratio_to_reference": 0.9999999188721185,
+            "zero_fraction": 0.0
+          }
+        },
+        "kernel_gradient": {
+          "fp32": {
+            "cosine_to_reference": 0.9999999999999999,
+            "l2": 10595.37259457886,
+            "l2_ratio_to_reference": 1.0,
+            "zero_fraction": 0.0
+          },
+          "fp8_direct": {
+            "cosine_to_reference": 0.9986126207581687,
+            "l2": 10580.00313664141,
+            "l2_ratio_to_reference": 0.9985494178897197,
+            "zero_fraction": 0.0
+          },
+          "repaired_resident": {
+            "cosine_to_reference": 0.9986126207581687,
+            "l2": 10580.00313664141,
+            "l2_ratio_to_reference": 0.9985494178897197,
+            "zero_fraction": 0.0
+          },
+          "resident_vs_direct": {
+            "cosine_to_reference": 1.0,
+            "l2": 10580.00313664141,
+            "l2_ratio_to_reference": 1.0,
+            "zero_fraction": 0.0
+          }
+        }
+      }
+    },
+    "device": "cuda:0",
+    "kernel_scale": 0.00019999999494757503,
+    "width": 512
+  }
+}

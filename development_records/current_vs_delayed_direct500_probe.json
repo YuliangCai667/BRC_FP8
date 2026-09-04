@@ -1,0 +1,37 @@
+{
+  "method": "same_fp32_weights_same_probe_current_amax_vs_saved_delayed_amax_forward_vjp",
+  "source_run": "brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2",
+  "source_step": 500000,
+  "source_checkpoint": "analysis_step_000000500000",
+  "probe_batch_size": 256,
+  "vjp_cotangent": "jax.random.normal(PRNGKey(17), logits_shape) * 1e-4",
+  "logits_relative_l2": 0.004814222455024719,
+  "expected_q_mae": 0.003915771842002869,
+  "kernel_vjp": {
+    "BronetBlock_0/Dense_0": {
+      "cosine": 0.9756511449813843,
+      "l2_ratio_current_over_direct": 0.9992780089378357,
+      "direct_zero_fraction": 0.0028170347213745117,
+      "current_zero_fraction": 0.002818286418914795
+    },
+    "BronetBlock_0/Dense_1": {
+      "cosine": 0.998184084892273,
+      "l2_ratio_current_over_direct": 0.9979054927825928,
+      "direct_zero_fraction": 0.02277335524559021,
+      "current_zero_fraction": 0.02305704355239868
+    },
+    "BronetBlock_1/Dense_0": {
+      "cosine": 0.9894824028015137,
+      "l2_ratio_current_over_direct": 0.9907860159873962,
+      "direct_zero_fraction": 1.1920928955078125e-7,
+      "current_zero_fraction": 2.086162567138672e-7
+    },
+    "BronetBlock_1/Dense_1": {
+      "cosine": 0.9979287981987,
+      "l2_ratio_current_over_direct": 1.0002446174621582,
+      "direct_zero_fraction": 0.8348761796951294,
+      "current_zero_fraction": 0.8347486257553101
+    }
+  },
+  "interpretation": "Current-amax versus saved delayed-amax is a real but small operator mismatch at a healthy evolved state. It is a plausible secondary source of closed-loop trajectory variance, not a catastrophic forward or backward failure."
+}

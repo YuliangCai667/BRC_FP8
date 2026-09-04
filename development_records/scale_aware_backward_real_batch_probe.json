@@ -1,0 +1,140 @@
+{
+  "real_batch": {
+    "dQ_da": {
+      "fp8_direct": {
+        "cosine_to_reference": 1.0000000000000002,
+        "l2": 0.014018271040102958,
+        "l2_ratio_to_reference": 1.0,
+        "zero_fraction": 0.0
+      },
+      "repaired_resident": {
+        "cosine_to_reference": 0.9898835441046714,
+        "l2": 0.014043718324524923,
+        "l2_ratio_to_reference": 1.00181529407936,
+        "zero_fraction": 0.0
+      }
+    },
+    "device": "cuda:0",
+    "examples": 256,
+    "kernel_gradients": {
+      "q_value_ensemble/q_value_ensemble/critic/BronetBlock_0/Dense_0/kernel": {
+        "fp8_direct": {
+          "cosine_to_reference": 1.0,
+          "l2": 4.882596212387082,
+          "l2_ratio_to_reference": 1.0,
+          "zero_fraction": 0.0
+        },
+        "members": {
+          "0": {
+            "cosine_to_reference": 0.9994427992009228,
+            "l2": 3.385625109827652,
+            "l2_ratio_to_reference": 0.9996611554964135,
+            "zero_fraction": 0.0
+          },
+          "1": {
+            "cosine_to_reference": 0.9991180121099383,
+            "l2": 3.5235977631972117,
+            "l2_ratio_to_reference": 1.0018667518078255,
+            "zero_fraction": 0.0
+          }
+        },
+        "repaired_resident": {
+          "cosine_to_reference": 0.999273495329741,
+          "l2": 4.886532367753629,
+          "l2_ratio_to_reference": 1.0008061603285074,
+          "zero_fraction": 0.0
+        }
+      },
+      "q_value_ensemble/q_value_ensemble/critic/BronetBlock_0/Dense_1/kernel": {
+        "fp8_direct": {
+          "cosine_to_reference": 1.0,
+          "l2": 7.156280913654542,
+          "l2_ratio_to_reference": 1.0,
+          "zero_fraction": 0.001003265380859375
+        },
+        "members": {
+          "0": {
+            "cosine_to_reference": 0.9998229664649025,
+            "l2": 4.904522801554986,
+            "l2_ratio_to_reference": 1.0003119813462609,
+            "zero_fraction": 0.001953125
+          },
+          "1": {
+            "cosine_to_reference": 0.9996865440908305,
+            "l2": 5.2154328348019865,
+            "l2_ratio_to_reference": 1.0005100278675256,
+            "zero_fraction": 0.0
+          }
+        },
+        "repaired_resident": {
+          "cosine_to_reference": 0.9997505698449834,
+          "l2": 7.1592655744359295,
+          "l2_ratio_to_reference": 1.0004170687005443,
+          "zero_fraction": 0.0009765625
+        }
+      },
+      "q_value_ensemble/q_value_ensemble/critic/BronetBlock_1/Dense_0/kernel": {
+        "fp8_direct": {
+          "cosine_to_reference": 1.0,
+          "l2": 4.759886237791016,
+          "l2_ratio_to_reference": 1.0,
+          "zero_fraction": 0.0
+        },
+        "members": {
+          "0": {
+            "cosine_to_reference": 0.9996918812865668,
+            "l2": 3.2801273923901806,
+            "l2_ratio_to_reference": 0.999627359608832,
+            "zero_fraction": 0.0
+          },
+          "1": {
+            "cosine_to_reference": 0.9992397453099922,
+            "l2": 3.4509687952792416,
+            "l2_ratio_to_reference": 1.0008376945056996,
+            "zero_fraction": 0.0
+          }
+        },
+        "repaired_resident": {
+          "cosine_to_reference": 0.9994542990198438,
+          "l2": 4.761136559299625,
+          "l2_ratio_to_reference": 1.0002626788637683,
+          "zero_fraction": 0.0
+        }
+      },
+      "q_value_ensemble/q_value_ensemble/critic/BronetBlock_1/Dense_1/kernel": {
+        "fp8_direct": {
+          "cosine_to_reference": 1.0,
+          "l2": 6.34651806100393,
+          "l2_ratio_to_reference": 1.0,
+          "zero_fraction": 0.0029315948486328125
+        },
+        "members": {
+          "0": {
+            "cosine_to_reference": 0.9999439460517697,
+            "l2": 4.429788603197788,
+            "l2_ratio_to_reference": 0.9993834551761571,
+            "zero_fraction": 0.00391387939453125
+          },
+          "1": {
+            "cosine_to_reference": 0.9999286918173379,
+            "l2": 4.542751779667584,
+            "l2_ratio_to_reference": 1.000134464267403,
+            "zero_fraction": 0.0019683837890625
+          }
+        },
+        "repaired_resident": {
+          "cosine_to_reference": 0.9999360592910306,
+          "l2": 6.345046950235594,
+          "l2_ratio_to_reference": 0.9997682019094258,
+          "zero_fraction": 0.002941131591796875
+        }
+      }
+    },
+    "loss": {
+      "fp8_direct": 6.859557151794434,
+      "repaired_resident": 6.867015838623047
+    },
+    "replay_path": "runs/DMC_DOGS/brc_dmc_dogs_target_fp8_direct_fp32_storage_s42_gpu2/checkpoints/recovery_step_000000500000/replay_buffer",
+    "width": 512
+  }
+}

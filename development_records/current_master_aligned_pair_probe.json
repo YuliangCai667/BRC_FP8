@@ -1,0 +1,24 @@
+{
+  "method": "deterministic_aligned_current_master_vs_resident_closed_update_probe",
+  "seed": 42,
+  "width_critic": 16,
+  "width_actor": 16,
+  "num_tasks": 2,
+  "batch_size": 8,
+  "target_precision": "fp8_direct",
+  "alignment": "current-master online physical params and target state replaced by resident physical params and target state before step 0; Adam states are identically zero",
+  "columns": [
+    "learner_updates",
+    "max_residual_kernel_relative_l2",
+    "critic_logits_relative_l2"
+  ],
+  "rows": [
+    [0, 0.0, 0.0],
+    [1, 0.0008974618394859135, 0.0],
+    [2, 0.0017548664472997189, 0.0005018318188376725],
+    [3, 0.0026144073344767094, 0.010103726759552956],
+    [5, 0.004300589673221111, 0.01549083273857832],
+    [10, 0.00842344481498003, 0.027712201699614525]
+  ],
+  "interpretation": "The first resident write loses off-lattice state while preserving the quantized forward exactly. Repeated otherwise matched updates accumulate that hidden-state loss into a measurable function-trajectory divergence. This is a mechanism probe, not a reward result."
+}

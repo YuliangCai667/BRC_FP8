@@ -64,3 +64,63 @@
   resident 重跑最终 return 从 `505.98` 到 `667.78`，显示长程轨迹敏感；
   bootstrap amplification 未经 open-loop 因果对照证明，吞吐与能耗也不应
   从共享运行条件推断。
+
+## CARRY-FP8 resident vs. current-amax FP32 master
+
+| Dogs seed42 condition | 100k return | 100k critic pnorm | Persistent covered-kernel state |
+|---|---:|---:|---|
+| FP8-direct / FP32 parameters | `340.61` | `1129.21` | FP32 weight |
+| current-amax / FP32 master | `244.89` | `1090.48` | FP32 weight |
+| repaired resident | `157.98` | `4171.12` | E4M3 main + FP32 scale |
+| repaired resident + fixed anchor | `134.44` | `519.08` | E4M3 main + FP32 scale + fixed norm |
+| corrected CARRY-FP8 resident (`jitbarrier_v1`) | `261.69` | `1479.86` | E4M3 main + E4M3 carry + FP32 scale |
+
+- **Primary comparison**：CARRY-FP8 and the current-amax/FP32-master arm share
+  current-amax FP8 compute and repaired scale-aware backward. Their intended
+  difference is whether continuous online parameter position is represented by
+  FP32 weights or `Theta=s(C+R/16)`. The delayed-amax FP8-direct arm is a
+  secondary reference because it also changes the scaling policy.
+- **Engineering evidence, corrected**：the eager/CPU arithmetic and storage
+  design are internally valid, and main/carry payloads are each `128 MiB` with
+  no FP32 master. However, the width-4096 `39.65x–43.32x` checkpoint probe crossed
+  a materialization boundary and did not test the production GPU-JIT graph.
+  Under GPU JIT, immediate FP8 widening bypasses the lossy cast and makes the
+  residual zero. A code-side `optimization_barrier` restores the expected
+  lossy main round trip and nearly fully nonzero carry in a 4096² probe. This
+  correction is now applied centrally and passes the actual carry kernel's
+  GPU-JIT regression plus the full `64/64` CPU suite. Both the width-4096
+  consecutive-update gate and Dogs 5001/recovery-next-update gate pass with
+  nonzero carry, `35.0x–48.1x` reconstruction improvement, zero saturation,
+  finite gradients, and zero NaN/Inf. Corrected formal launch is authorized.
+- **Formal state**：the pre-barrier matched seed42/seed1 runs under W&B
+  `a4h7dp4d/ddivbdzt` failed the persistent-carry gate at both 25k and 50k:
+  all 8 carry tensors are zero, main/logical errors and norms are identical,
+  and reduction ratio is approximately one. Seed42 pnorm at 25k/50k/68k is
+  `782.90/1839.92/2605.80`, close to repaired resident
+  `733.80/1930.97/2608.39`, versus current-master
+  `472.85/720.93/about 851@65k`. Its 25k/50k return is `47.22/80.02`, versus
+  repaired `45.94/101.41` and current-master `49.53/113.17`; early return alone
+  is not decisive, but the all-zero carry makes this treatment invalid for a
+  CARRY-FP8 return claim.
+  They were stopped at about 136k and retained as invalid controls. The corrected
+  fresh `jitbarrier_v1` runs passed every 25k carry gate through 450k. Seed42
+  was intentionally stopped at env 454409 after a 450k return/best of `832.74`;
+  seed1 reached 500k with final/best/tail-three `782.86/807.60/793.28` and zero
+  update NaN/Inf. Seed42's 450k reconstruction improvement remained
+  `66.64x–1130.49x` with zero carry saturation.
+- **Root cause / diagnostic validity**：the persisted main codes are genuinely
+  E4M3, but same-compiled-graph dequantization of a newly produced code is
+  falsely seen as the pre-cast FP32 value. Therefore the current run's
+  `main_write_relative_l2≈1e-8`, carry reconstruction, applied/intended, and
+  related new-code write metrics are not trustworthy. This is a GPU compiler
+  boundary bug in the present environment, not evidence that Adam candidates
+  exactly land on the E4M3 lattice.
+- **Pre-registered 100k statistic**：the corrected seed42 return is `261.69`, so
+  gap closure against the primary current-master reference is
+  `(261.69 - 157.98) / (244.89 - 157.98) = 1.193`. It closes the measured
+  repaired-resident→current-master gap at 100k and slightly exceeds that control,
+  while remaining below delayed-amax direct `340.61`. Its 100k pnorm `1479.86`
+  is above current-master/direct `1090.48/1129.21` but far below repaired
+  resident `4171.12`. The 450k/500k results establish learning effectiveness;
+  exact seed-matched final parity remains limited because seed42 was stopped at
+  454409 for the accepted target-lag follow-up.

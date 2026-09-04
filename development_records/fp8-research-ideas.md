@@ -376,9 +376,9 @@ This narrative is conditional on stages 2 and 3 actually demonstrating the mecha
 
 ## Idea 002: Resident Low-Precision Critic Weights
 
-Status: `supported` for lag-coded target state; naive target storage `rejected`; naive online resident weights `rejected`, LayerNorm scale-gauge instability `diagnosed`
+Status: `supported` for lag-coded target state; naive target storage `rejected`; naive online backward `rejected`; repaired scale-aware online resident operator `testing`; fixed anchor supports its norm invariant but is `rejected as a sufficient online return repair at 100k`; matched current-amax FP32-master isolation `supports masterless-write attribution at 100k`, run continuing
 
-Updated: 2026-09-02. The first resident-state implementation was limited to the target Critic residual core. It consumes stored E4M3 kernels directly in target forward GEMMs while input/output projections, LayerNorm, biases, task embeddings, and all online learning state retain their selected existing precision. Formal C/D runs decisively rejected naive per-step requantized EMA: arithmetic remained finite, but target tracking and return stagnated. Lag-coded target state subsequently completed the Dogs seed-42 closed loop with final return `806.10`, supporting the representation correction for the target update. The completed online-resident Dogs run reached final return `505.98` versus `757.81` for the matched target-forward-only control, while critic pnorm reached `11428.8` versus `2712.0`. The four resident kernels contributed 99.0% of squared critic norm. The failure reproduced the stopped precursor run through 275k. Sparse optimizer/quantization radial cosines do not show a stable outward direction, and update retention plus one-step expected-Q fidelity remain high. Checkpoint evidence instead shows that several resident matrices preserve nearly the same FP8 code direction and code norm while their FP32 scale and physical norm grow by `16x–36x`. The supported mechanism is therefore smooth scale-dominated drift along the scale freedom created by the immediately following LayerNorms; whether RL bootstrapping amplifies the resulting trajectory divergence remains unproven.
+Updated: 2026-09-03. The first resident-state implementation was limited to the target Critic residual core. It consumes stored E4M3 kernels directly in target forward GEMMs while input/output projections, LayerNorm, biases, task embeddings, and all online learning state retain their selected existing precision. Formal C/D runs decisively rejected naive per-step requantized EMA: arithmetic remained finite, but target tracking and return stagnated. Lag-coded target state subsequently completed the Dogs seed-42 closed loop with final return `806.10`, supporting the representation correction for the target update. The online-resident runs also showed real scale-dominated norm growth, while a retrospective gradient audit found every recorded resident-kernel gradient exactly zero (`68/68` fixed-anchor and `80/80` naive seed42), versus `80/80` nonzero in the matched FP8-direct control. The missing scale-aware backward was a real implementation failure and is now repaired. However, the fresh repaired-backward + fixed-initial-anchor arm reached only `134.44` return at 100k versus `157.98` for repaired-only and `340.61` for matched FP8-direct, even though all four resident gradients are nonzero and all eight anchors pass independent checkpoint audit. The new causal evidence rejects both backward repair and fixed norm, alone or together, as sufficient explanations of the remaining return gap. The common unresolved mechanism is now the masterless online E4M3 parameter transition and its optimization trajectory. A strict current-amax FP8-compute/FP32-master control is running to remove the remaining current-amax-versus-delayed-amax mismatch from that attribution.
 
 Accepted scope definition: full persistent-state FP8 applies to large,
 long-lived payloads such as online/target matrix state and later optimizer
@@ -490,21 +490,415 @@ therefore scale-gauge norm runaway causing intended angular-step collapse;
 the exact origin of the accumulated first-order radial drift remains unresolved
 because diagnostics sample only one update every 25k env steps.
 
-### Candidate intervention after the online-resident diagnosis
+### 2026-09-03 failed intervention: Moving-Anchor FP8 Residency
 
-The leading candidate is a LayerNorm-aware, norm-canonicalized resident write:
-after the transient Adam candidate is formed, remove the redundant global gain
-by restoring each resident layer/member to a fixed reference Frobenius norm,
-then quantize the normalized direction. The reference is one FP32 scalar per
-layer/member, not a full-size master or residual. This directly prevents the
-observed scale-only runaway while preserving the function approximately because
-each covered Dense is immediately followed by LayerNorm. It remains a candidate,
-not an accepted method. Removing only the optimizer update's radial component is
-lower priority because the measured optimizer radial cosine is centered near
-zero; frozen scale risks clipping, and per-block scaling alone does not remove
-the same gauge freedom. The next decision gate is a matched baseline versus
-norm-canonicalized write, optionally followed by tangent-update projection if
-norm anchoring alone is insufficient.
+Status: previous-norm recurrent formulation `mechanism-failed` and its two
+formal runs were stopped on 2026-09-03; fixed-reference radius revision remains
+a candidate.
+
+The tested intervention was a LayerNorm-aware, per-update canonicalized
+resident write. For each kernel/member, the AdamW candidate is quantized exactly
+once with the unchanged current-amax E4M3 quantizer. If `C_next` and `q_next` are
+that raw code and scale, it computes
+`alpha = ||W_old||_F / max(||q_next C_next||_F, 1e-12)`, persists the same
+`C_next` with scale `alpha q_next`, and writes the paired FP32 candidate bias as
+`alpha b_candidate`. Scaling kernel and bias together preserves the complete
+pre-LayerNorm affine output up to a positive global factor. AdamW moments remain
+FP32 and unmodified.
+
+This differs from the earlier candidate wording: it uses the previous physical
+kernel norm as the current radius after raw quantization and needs no separate
+reference-norm tensor. Recursively applying the rule keeps the initialized norm
+while preserving the quantizer-selected code/direction. The implementation and
+validation are recorded in
+[2026-09-03-gauge-fixed-fp8-residency.md](2026-09-03-gauge-fixed-fp8-residency.md),
+and the matched formal runs are `EXP-FP8-ONLINE-CANON-S42/S1` in the
+[experiment ledger](experiment-runs.md). The next decision gate is whether fixed
+norm prevents scale runaway, restores effective angular motion, and closes the
+naive-resident return gap; tangent projection remains deferred.
+
+The first mechanism readout on 2026-09-03 falsified the assumption that the
+previous physical norm can serve as a numerically stable recursive anchor.
+Although each sampled write reports `post/old` within about `1.2e-7` of one,
+seed42's four-kernel norm grows `804.1→1833.9` from 25k to 50k, while code L2 is
+nearly unchanged and stored scale carries the growth. The matched naive seed42
+grows `441.1→794.1` over the same interval. The discrepancy identifies
+accumulated FP32 reduction/scale recurrence and a self-correlated single-write
+diagnostic, not successful gauge fixing. A fixed initialization-radius scalar
+per kernel/member would remove the recursive anchor and costs only eight FP32
+scalars. The formal seed42/seed1 runs were stopped at env step `55152/47628`
+after writing `run_interrupted` and `run_finished`; this revision is not yet
+implemented or accepted for launch.
+
+### 2026-09-03 revision: Fixed-Initialization-Anchor FP8 Residency
+
+Status: norm mechanism implemented and validated; seed42 25k mechanism gate
+passed, but the 425k reward readout exposed an independent resident-backward
+failure, so this run cannot establish fixed-anchor return efficacy.
+
+For each of the four resident kernels and two ensemble members, initialization
+now persists `rho0 = ||dequantize(initial_code, initial_scale)||_F` as one FP32
+scalar. Every AdamW candidate still undergoes exactly one current-amax E4M3
+quantization. The write keeps `C_next`, sets
+`scale_next = rho0 / ||C_next.astype(float32)||_F`, and scales the paired bias by
+`scale_next / raw_scale`. No previous physical norm enters the enabled path, so
+rounding error cannot become the next reference radius.
+
+The checkpoint gate independently reloads serialized code, scale, and anchor
+and computes `scale * ||code.astype(float64)|| / rho0` with NumPy float64 for all
+eight members. Implementation and validation are recorded in
+[2026-09-03-fixed-anchor-fp8-residency.md](2026-09-03-fixed-anchor-fp8-residency.md).
+
+The resumed seed42 run reached `572.84` at 400k and `499.04` at 425k, versus
+`766.69/764.57` for the matched target-forward-only control. This is not a
+renewed anchor drift: the 400k independent ratios are
+`0.9996764–1.0035631`, and the 425k combined resident norm is still about
+`256.0`. Instead, all 68 fixed-anchor resident-kernel gradient records are
+exactly zero. The same defect is present in all 80 records of the completed
+naive seed42 run, while all 80 matched FP8-direct records are nonzero.
+
+The backward-invalid `ResidentFp8Dense` differentiated a raw E4M3
+`lax.dot_general` whose
+scale multiplication is outside the dot. Unlike Flax FP8 Direct, it has no
+custom VJP that dynamically scales the output gradient to E5M2 and dequantizes
+the operand gradients. The unscaled cotangent is therefore cast to FP8 before
+reciprocal-scale recovery and usually underflows. This explains both partial
+learning through FP32 projections/biases/LayerNorm/residual skips and the
+failure to match the control. Future fixed-anchor return tests require a
+scale-aware resident backward first; further anchor tolerance changes do not
+address this failure.
+
+### 2026-09-03 repair: Scale-Aware Resident FP8 Backward
+
+Status: implementation and short numerical gates `passed`; formal Dogs seed42
+500k run `running` on GPU3.
+
+The resident forward still uses current-amax E4M3 activations, persistent E4M3
+kernel codes and FP32 accumulation.  Its backward now reuses Flax's
+`quantized_dot` custom VJP: FP32 output cotangents are dynamically scaled with
+the same delayed-amax policy as FP8-direct, represented in E5M2, and consumed by
+native FP8 transpose GEMMs.  The VJP returns physical FP32 kernel gradients
+scaled by activation/output-gradient scales and physical FP32 input gradients
+scaled by kernel/output-gradient scales.  Autodiff no longer traverses the
+physical-kernel-to-E4M3 cast.
+
+The output-gradient scale/history is persistent checkpoint metadata for all
+four layers and both members.  Actor updates advance the same metadata while
+propagating through the critic, so `dQ/da` uses the repaired input gradient.
+AdamW moments and candidate/writeback behavior are unchanged.  The first
+formal repair run deliberately disables canonicalization to isolate this
+intervention.
+
+The separate 25k mechanism gate was subsequently cancelled by the user.  The
+first formal seed42 run therefore starts directly with `max_steps=500000` and
+the normal 25k eval/tensor cadence; only startup is accepted here, with manual
+stopping left to the user.  Seed1 remains sequential after seed42 completion.
+
+Observed pre-run gates: the independent GPU probe gives repaired-resident vs
+FP8-direct kernel cosine/L2 ratio `1.0/1.0` at output-gradient sigma
+`1e-3/1e-2`, with no zero coordinates.  On a retained real Dogs batch, all four
+kernel gradients have cosine `0.99927–0.99994` and L2 ratio
+`0.99977–1.00081` versus FP8-direct; `dQ/da` has cosine `0.98988`, L2 ratio
+`1.00182`, and no zero coordinates.  The 203-update end-to-end GPU smoke is
+finite and all four kernel gradients are nonzero.  Details and limitations are
+recorded in
+[2026-09-03-scale-aware-resident-fp8-backward.md](2026-09-03-scale-aware-resident-fp8-backward.md).
+
+Observed 94k readout: the repaired kernel gradients remain nonzero and the
+candidate-to-resident write remains geometrically faithful, but the unanchored
+resident norm runaway has returned more rapidly.  The independently decoded
+combined resident-kernel norm is `691.53` at 25k and `1905.03` at 50k; the 75k
+sample is `3022.31`, about `11.8x` the approximately `256` initialization norm.
+Critic pnorm at 75k is `3046.30` versus `958.63` for the matched FP8-direct
+control.  Eval return is `129.44` versus `220.44`; all four control tasks are
+higher at that point.  The sampled intended effective angular step mean falls
+about `5x` from 25k to 75k.
+
+Inference: repairing the backward is necessary but does not remove the
+scale-gauge degree of freedom; once physical gradients are restored, radial
+drift can be faster than in the backward-invalid runs.  The evidence supports,
+but does not yet prove, norm runaway as the remaining cause of the reward gap.
+The clean next causal arm is a fresh same-seed run combining the validated
+scale-aware backward with the fixed-initial anchor.  The old fixed-anchor run
+cannot answer this because its resident kernels received zero gradients.  The
+user accepted this arm on 2026-09-03; it is planned from random initialization
+on GPU0 as `EXP-FP8-ONLINE-SCALED-BWD-FIXED-ANCHOR-S42-500K`.  It started at
+2026-09-03 17:16:25 Asia/Shanghai and passed startup acceptance; status is
+`running`.
+
+Observed 100k fixed-anchor causal readout: the combined intervention does not
+recover the control curve.  Mean eval return is `134.44`, versus `157.98` for
+the repaired unanchored arm and `340.61` for the matched FP8-direct/FP32-weight
+control.  The corresponding critic pnorm values are
+`519.08/4171.12/1129.21`; update NaN/Inf counts remain `0/0`.  NumPy float64
+decoding of the serialized 100k checkpoint gives all eight
+`scale * ||code|| / rho0` ratios in `0.9999815–1.0004089`, and all four sampled
+resident-kernel gradients are nonzero.  This is therefore neither recurrence
+of moving-anchor drift nor recurrence of the old all-zero backward.
+
+The immediate write is also functionally close: at 100k its aggregate
+expected-Q MAE is `1.80e-5`, critic-loss relative error `9.27e-8`, and JS
+divergence about `1.03e-8`.  Nevertheless, an average `80.69%` of stored E4M3
+codes are unchanged in that write.  Fixed anchoring preserves the norm of the
+tangential update almost exactly, but it is not optimization-neutral: it pins
+each member at the initialization norm `90.51`, while the matched direct
+control's four combined-member residual-kernel norms have already grown to
+`241.87–669.69` at 100k.  The layer is functionally close to scale-invariant
+because each affine is followed by LayerNorm, but AdamW and its coordinatewise
+moments are not invariant to this reparameterization.  Consistently, several
+fixed-run kernel directions rotate strongly between 50k and 100k (cosine as
+low as `0.0458–0.3246`), whereas the runaway unanchored arm is nearly frozen
+in code direction between 100k and 150k (most cosine values
+`0.999999–1.0`).  Thus the two existing resident arms occupy opposite bad
+regimes: unanchored scale growth suppresses code/directional motion, while an
+initial-radius hard projection removes the norm evolution that normally sets
+the effective angular learning-rate scale.
+
+Revised inference: norm runaway is a valid symptom and fixed anchoring solves
+its stated invariant, but it is not the primary causal explanation for the
+return deficit.  The next isolating control should preserve FP32 optimizer
+parameter evolution while matching the resident current-amax forward/backward
+operator, or equivalently add a non-persistent experimental shadow only for
+causal diagnosis.  That separates per-step masterless E4M3 projection from
+the current-amax versus delayed-amax compute-policy mismatch before designing
+an error-feedback or scale-decoupled resident update.  This is a proposed next
+gate, not an implemented method or an authorization to launch another run.
+
+Continued 100k exclusion checks narrow the fixed-arm mechanism further.  On
+the exact serialized physical weights and retained probe batch, resident FP8
+versus a full-FP32 Critic gives loss relative error `6.54e-6`, residual-kernel
+gradient cosine `0.98384–0.98892` with L2 ratio `0.88758–0.92540`, and
+actor-facing `dQ/da` cosine/L2 ratio `0.9999979/0.9999878`.  The E5M2 history
+is not at the old underflow cliff: fixed-layer current/history amax ratios are
+roughly `0.36–0.44` at 100k, while a healthy direct layer can be as low as
+`0.07`.  All `134,217,728` resident code elements round-trip exactly through
+the critic-update `code -> float32 physical -> code` path.  Online-target
+kernel cosine is `0.9999933–0.9999999` with relative gap
+`0.000552–0.003675`, so the FP32 target EMA is tracking rather than collapsing.
+
+The optimizer-state check also rejects the simple claim that stale radial
+momentum is being thrown away wholesale.  At fixed100, first-moment cosine to
+the weight is only about `6.9e-5–1.3e-3`; coordinatewise Adam normalization
+creates at most a `0.171` radial cosine in the sampled next direction, and the
+recorded write removes that radial component while preserving tangential
+direction to numerical precision.  The more specific mechanism is the scale
+dependence of the *effective angular step*: for a LayerNorm-preceding affine,
+rescaling kernel and bias leaves the function nearly unchanged and rescales
+the raw gradient inversely, while Adam's normalized absolute step is
+approximately scale-invariant.  Hence angular motion scales approximately as
+`1 / ||W||`.  Direct training allows the four combined-member norms to grow
+from about `128` initially to `241.87–669.69` by 100k; fixed anchoring holds
+them at `128`.  The hard anchor therefore removes the implicit angular
+learning-rate decay that the healthy control actually uses.  The unanchored
+resident arm overshoots in the opposite direction, with several norms in the
+thousands and near-frozen code direction.  This explains why both extremes
+can underperform without requiring a local forward, backward, write, or target
+tracking failure.
+
+### 2026-09-03 causal isolation: Current-Amax FP8 with FP32 Master
+
+Status: implementation/unit gates `passed`; Dogs seed42 150k control `running`
+on GPU1.
+
+This control changes only the online residual-kernel persistent state relative
+to the repaired resident operator. Each forward independently quantizes the
+FP32 activation and persistent FP32 kernel with current-amax E4M3 scaling, then
+uses the same `quantized_dot`, FP32 accumulation, output dequantization and
+scale-aware delayed-amax E5M2 custom backward as the repaired resident path.
+AdamW updates FP32 parameters normally. There is no resident code/scale write,
+canonicalization, persistent FP8 shadow, or delayed-amax weight/input history.
+Target precision and every RL hyperparameter remain matched.
+
+The initial current-master and resident logits are elementwise identical in the
+new unit gate, so this is not merely another FP32 or delayed-scaling baseline.
+All current-master parameters and floating optimizer leaves are FP32; after
+three learner updates the parameters move and each of the four output-gradient
+histories advances. The formal run is
+`EXP-FP8-ONLINE-CURRENT-MASTER-S42-150K`, W&B `vgd8apty`. At 25k its return is
+`49.53`, versus repaired/fixed/direct `45.94/34.78/19.92`; therefore it does not
+reproduce an early resident deficit, although this first point precedes curve
+separation. Its critic pnorm `472.85` is already much closer to direct `495.37`
+than repaired `733.80` or fixed `359.29`. The four serialized combined-member
+kernel norms show the same current/direct proximity, and all four current-master
+kernel gradients are nonzero. The 50k/100k return trajectory remains the
+decision evidence.
+
+At 50k, the behavior and geometry now agree with the causal prediction.
+Current-master return is `113.17`, or `94.0%` of direct `120.40`, versus
+repaired/fixed resident `101.41/87.12`; all four task returns individually
+track direct. Current/direct critic pnorm is `720.93/756.40`, while
+repaired/fixed is `1930.97/412.72`. The four physical kernel norms likewise
+match current to direct rather than either resident regime. This supports the
+loss of the off-lattice FP32 parameter position during every resident write as
+the main trajectory-separation cause. It remains a single-seed 50k result;
+75k/100k must confirm it after the control curve normally accelerates.
+
+At 75k the separation is larger: current-master return `178.43` is
+`37.9%/38.0%` above repaired/fixed resident `129.44/129.26`, and every task is
+individually higher. It remains `19.1%` below direct `220.44`, so the evidence
+supports masterless writeback as the main cause rather than the sole source of
+all single-seed trajectory variance. The 100k point is retained as the final
+decision gate.
+
+The 100k gate confirms a large but not exclusive masterless-write effect.
+Current-master return is `244.89`, versus repaired/fixed/direct
+`157.98/134.44/340.61`: retaining the off-lattice FP32 parameter position gains
+`55.0%/82.2%` over the two resident arms, and every task improves. Its internal
+trajectory is much closer to direct than reward alone suggests: current/direct
+critic pnorm is `1090.48/1129.21`, four layer norms are close, and the 5k–100k
+critic-pnorm SMAPE is only `3.63%`, versus `77.11%/47.97%` against
+repaired/fixed. Q-prediction and actor-pnorm trajectories also assign current
+to direct. Therefore the resident state replacement, not a broken current-amax
+GEMM or backward, causes the abnormal optimization geometry and a large return
+loss. The remaining `28.1%` current-to-direct return gap means the small
+current/delayed scaling-policy difference is amplified materially by the RL
+closed loop; it must remain a second causal factor rather than being dismissed.
+
+The remaining current-versus-delayed compute mismatch is independently small
+at a healthy evolved state. Using the direct 500k FP32 parameters and exact
+saved probe input for both operators, current-amax versus saved delayed-amax
+has logits relative L2 `0.004814`, expected-Q MAE `0.003916`, and four kernel
+VJP cosine/L2-ratio ranges `0.97565–0.99818` / `0.99079–1.00024`; gradient zero
+fractions are nearly identical. This mismatch can still perturb a sensitive RL
+trajectory and may contribute to the residual single-seed return difference,
+but it is not a catastrophic local forward/backward failure.
+
+An additional deterministic width-16 probe removes even the initialization
+state mismatch: current-master online physical parameters and target state are
+replaced by the resident physical parameters and target state before update 0,
+while both Adam states are identically zero. Step 0 parameters and logits match
+exactly. After one update, the resident write creates only `0.000897` maximum
+relative kernel error and the quantized logits still match exactly; after ten
+otherwise matched closed updates, kernel error is `0.008423` while logits
+relative L2 reaches `0.027712`. This directly demonstrates that discarding the
+off-lattice FP32 position can accumulate into a function-trajectory difference
+even when the immediate quantized forward initially hides the write error.
+
+### 2026-09-04 method under test: CARRY-FP8 trajectory preservation
+
+Status: `corrective main+carry barriers validated; formal dual-seed running`. The
+matched Dogs seed42/seed1 formal runs failed the 25k/50k/75k/100k
+persistent-carry gate. A minimal probe shows
+that the current GPU-JIT graph bypasses the lossy value of a newly-created FP8
+code when it is immediately widened, so the residual used for carry is compiled
+to zero. Those runs were gracefully stopped and retained only as invalid
+negative controls.
+
+CARRY-FP8 directly targets the diagnosed off-lattice state loss without
+introducing an FP32 master or FP32 residual. Each resident kernel persists
+`(C,s,R)` and represents the logical optimizer parameter as
+`Theta=s(C+R/16)`, with both `C` and `R` in E4M3 and a shared per-member
+current-amax FP32 scale. Initialization first writes the ordinary main code and
+then quantizes `16 * (W_fp32/s-C)` into the carry, so the original FP32
+initialization residual is not discarded.
+
+The carry is deliberately absent from forward/backward: native FP8 compute
+continues to consume only `sC`, preserving the repaired scale-aware custom VJP
+and matched current-amax policy. At update time AdamW receives the transient
+logical tree, including parameter-dependent weight decay, and the continuous
+candidate is quantized once into the next main code/scale. The normalized
+write residual is then quantized into the next carry. Target EMA likewise reads
+the reconstructed logical online kernel, matching the FP32-master reference's
+continuous parameter semantics while keeping target precision unchanged.
+
+Observed unit evidence: main codes/scales and physical weights are identical to
+ordinary current-amax quantization; carry reconstruction reduces random and
+mixed-range matrix error; a two-element fixed-amax probe accumulates 32 updates
+of `4e-4`, crosses the small element's main-code grid while naive resident RTN
+remains frozen, and is over `4x` closer to the FP32 reference. Seven carry
+CPU/GPU tests and the full `35/35` FP8 plus `63/63` repository suites pass.
+
+Observed smoke evidence, reclassified after root-cause isolation: width-4096 Dogs completed at env 5001/update 5 with
+all four covered kernel gradients nonzero, no parameter/update NaN or Inf,
+E4M3 main/carry storage, zero saturation, and successful analysis/recovery
+checkpoints. The initial four real learner updates were a degenerate boundary
+case: their reported main-only write error was only `2.33e-8–6.53e-8`, carry
+was zero, and the reduction ratio was approximately one. Those values are now
+known to be false in-graph fidelity readings caused by the GPU JIT conversion
+bypass, not genuine lattice-aligned candidates. The recovery probe that produced
+main/logical relative error `0.008859–0.012317/0.000212–0.000311` and
+`39.65x–43.32x` reduction validated arithmetic across an eager/materialization
+boundary, not the production graph. The storage accounting remains valid: carry
+adds one `134,217,728`-byte E4M3 payload and no full-size FP32 tensor.
+
+Formal counter-evidence: in both seed42 and seed1, every one of the eight
+layer/member carry tensors is 100% zero at both 25k and 50k;
+`carry_prequant_absmax=0`, main/logical error is identical, reduction ratio is
+approximately one, and physical/logical norms coincide. Direct decoding of
+both 50k checkpoints confirms all four `(2,4096,4096)` carry arrays contain no
+nonzero values, so this is not a tensor-logger artifact. Gradients remain
+nonzero and update NaN/Inf remain zero, distinguishing the failure from the old
+unscaled-backward bug. Seed42 pnorm at 25k/50k/68k is
+`782.90/1839.92/2605.80`, close to repaired resident
+`733.80/1930.97/2608.39` and far above current-master
+`472.85/720.93/about 851@65k`. Thus the currently launched treatment does not
+implement effective long-horizon carry trajectory preservation, despite the
+isolated checkpoint-next-update probe. Root cause must be resolved before any
+formal return result is attributed to CARRY-FP8; no carry-gain variant is
+accepted in this cycle.
+
+Root cause evidence: on JAX/JAXLIB `0.6.0`, Flax `0.10.4`, driver
+`580.95.05`, and RTX PRO 6000 Blackwell, CPU JIT and GPU eager correctly expose
+the E4M3 round-trip error. GPU JIT instead reports a false near-identity
+round-trip and zero residual even though the returned FP8 code is genuinely
+quantized. A `4096x4096` plain probe reports main relative error `2.684e-8`,
+zero carry, and zero prequant residual. Placing `jax.lax.optimization_barrier`
+on the E4M3 code before any widening changes those values to `0.0264938`,
+`16,777,205/16,777,216` nonzero carry entries, and prequant absmax `255.995`.
+Stop-gradient, a bitcast detour, and a barrier on the FP32 candidate do not fix
+it. The next implementation gate must therefore validate returned-code and
+same-graph dequantization equality under GPU JIT; CPU-only arithmetic tests are
+insufficient.
+
+Corrective evidence: the shared quantizer now applies the main code-side
+barrier, and the carry cast has its own barrier as well. The actual vmapped
+carry kernel's GPU-JIT regression passes and makes in-graph main/logical
+reconstruction exactly equal to a second dispatch over both returned FP8
+buffers. A 4096² probe gives main/persisted-carry relative error
+`0.00122739/3.2394553e-5`, `16,767,853/16,777,216` nonzero carry entries, and
+zero saturation. The earlier `3.598577e-8` carry value was another unbarriered
+same-graph false reading. The complete CPU suite passes `64/64`. Corrected
+checkpoints record a new materialization semantic and refuse legacy resident/
+lag resumes. A dedicated-GPU width-4096 consecutive update and fresh 5001-step
+Dogs smoke both pass. The smoke and its actual recovery-next-update show
+`35.0x–48.1x` persisted reconstruction improvement, nonzero carry, zero
+saturation, finite resident gradients, and no NaN/Inf. Fresh tagged seed42/
+seed1 formal runs are therefore authorized; pre-barrier runs cannot be resumed.
+The fresh corrected runs started on GPU1/GPU2 at 04:48 with W&B
+`7mdayzva/hxf61n84`. Their 25k/50k/75k formal gates all show persistent nonzero
+carry, zero carry saturation, and zero tensor/update NaN or Inf. At 75k, carry
+reduces main-write error by `42.85x–668.98x`; eval return rises monotonically
+`72.14→125.16→185.73` for seed42 and `32.39→68.43→189.56` for seed1. The
+seed42 75k critic pnorm is `1212.55`, far below repaired resident without carry
+(`3046.30`) and its return is already in the same early-learning range as the
+target-FP8-direct/FP32-storage and current-master controls (`220.44/178.43`).
+The later evidence establishes more than an early trajectory: seed42 reached
+450k eval/best `832.74` before an intentional replacement stop at env 454409,
+while seed1 reached 450k `807.60` and then 500k final/best/tail-three
+`782.86/807.60/793.28`, with zero update NaN/Inf. Seed42's 450k carry remained
+nonzero and reduced reconstruction error `66.64x–1130.49x`. Across two seeds,
+corrected CARRY-FP8 is therefore established as an effective learning method
+under this Dogs protocol; exact final parity and cross-suite generality remain
+separate questions.
+
+The next accepted experiment combines online CARRY-FP8 with the existing
+lag-coded FP8 target so both online and target residual-Dense weight states avoid
+a full-size FP32 master. A width-4096 5001-step compatibility smoke passed and
+the fresh seed42 formal run started on GPU1 at 2026-09-04 10:32 Asia/Shanghai
+(W&B `5o2266m9`). The smoke showed nonzero online carry and target lag codes,
+finite training, and complete checkpoints. It also measured `2.30%–2.61%` lag
+quantization error, which is `4.58–5.20` times the tiny intended first-step EMA
+update; whether that startup noise remains benign is the explicit 25k mechanism
+and learning gate, not a pre-assumed conclusion.
+
+The formal run passed that 25k gate with eval return `58.07` and no NaN/Inf in
+925 tensor-stat records. Online carry stayed nonzero in 8/8 leaves and improved
+logical reconstruction by `199.80x–430.67x`; target lag also stayed nonzero in
+8/8 leaves with `0.845%–2.728%` lag quantization error. However, the error
+relative to the tiny intended EMA update remained `1.68–5.43`, and update
+cosine ranged from `-0.830` to `0.857`. The experiment therefore continues to
+50k/75k: the representation is operational and learning has started, while the
+long-horizon effect of noisy target increments is still an open empirical risk.
 
 ### Required measurements
 

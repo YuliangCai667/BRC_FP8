@@ -5,7 +5,12 @@ import optax
 from flax import traverse_util
 from flax.linen.fp8_ops import OVERWRITE_WITH_GRADIENT
 
-from jaxrl.networks import dequantize_e4m3, quantize_e4m3_per_tensor
+from jaxrl.networks import (
+    _quantize_carry_resident_kernel,
+    _reconstruct_carry_logical_kernel,
+    dequantize_e4m3,
+    quantize_e4m3_per_tensor,
+)
 from jaxrl.utils import Batch, Model, PRNGKey, tree_norm
 
 
@@ -21,6 +26,18 @@ def _scale_path(kernel_path):
     return kernel_path[:-1] + ('kernel_scale',)
 
 
+def _carry_path(kernel_path):
+    return kernel_path[:-1] + ('kernel_carry',)
+
+
+def _anchor_norm_path(kernel_path):
+    return kernel_path[:-1] + ('kernel_anchor_norm',)
+
+
+def _bias_path(kernel_path):
+    return kernel_path[:-1] + ('bias',)
+
+
 def _lag_scale_path(kernel_path):
     return kernel_path[:-1] + ('lag_scale',)
 
@@ -33,12 +50,85 @@ def _dequantize_ensemble(codes, scales):
     return jax.vmap(dequantize_e4m3)(codes, scales)
 
 
+def _reconstruct_carry_logical_ensemble(codes, scales, carry_codes):
+    return jax.vmap(_reconstruct_carry_logical_kernel)(
+        codes, scales, carry_codes
+    )
+
+
+def _quantize_carry_ensemble(kernels):
+    return jax.vmap(_quantize_carry_resident_kernel)(kernels)
+
+
 def _target_precision(target_critic: Model):
     return target_critic.apply_fn.critic_precision
 
 
 def _critic_precision(critic: Model):
     return critic.apply_fn.critic_precision
+
+
+def _resident_fixed_anchor_enabled(critic: Model):
+    return bool(
+        getattr(
+            critic.apply_fn,
+            'fp8_resident_canonicalization',
+            False,
+        )
+    )
+
+
+def _resident_carry_enabled(critic: Model):
+    return bool(getattr(critic.apply_fn, 'fp8_resident_carry', False))
+
+
+def _merge_resident_backward_metadata(current, backward_updates):
+    """Apply only output-gradient metadata emitted by the resident custom VJP."""
+    current_flat = traverse_util.flatten_dict(current)
+    updates_flat = traverse_util.flatten_dict(backward_updates)
+    for path in current_flat:
+        if path[-1] in ('output_grad_scale', 'output_grad_amax_history'):
+            current_flat[path] = updates_flat[path]
+    return traverse_util.unflatten_dict(current_flat)
+
+
+def _fixed_anchor_resident_affine(
+    candidate_bias,
+    next_codes,
+    raw_next_scale,
+    anchor_norm,
+):
+    """Anchor each resident member to its fixed initialization norm."""
+    candidate_bias = jnp.asarray(candidate_bias, dtype=jnp.float32)
+    raw_next_scale = jnp.asarray(raw_next_scale, dtype=jnp.float32)
+    anchor_norm = jnp.asarray(anchor_norm, dtype=jnp.float32)
+    raw_next_value = _dequantize_ensemble(next_codes, raw_next_scale)
+    code_values = next_codes.astype(jnp.float32)
+    reduce_axes = tuple(range(1, code_values.ndim))
+    code_norm = jnp.sqrt(
+        jnp.sum(jnp.square(code_values), axis=reduce_axes)
+    )
+    valid = (anchor_norm > 0) & (code_norm > 0)
+    fixed_scale = jnp.where(
+        valid,
+        anchor_norm / jnp.maximum(code_norm, jnp.float32(1e-12)),
+        raw_next_scale,
+    )
+    alpha = fixed_scale / raw_next_scale
+    canonical_kernel = _dequantize_ensemble(next_codes, fixed_scale)
+    bias_shape = alpha.shape + (1,) * (
+        candidate_bias.ndim - alpha.ndim
+    )
+    canonical_bias = candidate_bias * jnp.reshape(alpha, bias_shape)
+    return {
+        'raw_next_value': raw_next_value,
+        'canonical_kernel': canonical_kernel,
+        'canonical_bias': canonical_bias,
+        'canonical_scale': fixed_scale,
+        'alpha': alpha,
+        'anchor_norm': anchor_norm,
+        'code_norm': code_norm,
+    }
 
 
 def dequantize_critic_params(critic: Model):
@@ -57,17 +147,40 @@ def dequantize_critic_params(critic: Model):
     return traverse_util.unflatten_dict(physical)
 
 
+def reconstruct_carry_logical_critic_params(critic: Model):
+    """Build the transient optimizer/EMA tree with s * (C + R / 16)."""
+    if (
+        _critic_precision(critic) != 'fp8_resident'
+        or not _resident_carry_enabled(critic)
+    ):
+        return dequantize_critic_params(critic)
+
+    params = traverse_util.flatten_dict(critic.params)
+    metadata = traverse_util.flatten_dict(critic.fp8_meta)
+    logical = dict(params)
+    for path, value in params.items():
+        if _is_resident_kernel(path):
+            logical[path] = _reconstruct_carry_logical_ensemble(
+                value,
+                metadata[_scale_path(path)],
+                metadata[_carry_path(path)],
+            )
+    return traverse_util.unflatten_dict(logical)
+
+
 def initialize_critic_optimizer(critic: Model):
-    """Keep Adam state in physical FP32 space for resident online weights."""
+    """Initialize Adam on the resident logical parameter tree."""
     if _critic_precision(critic) != 'fp8_resident':
         return critic
-    return critic.replace(opt_state=critic.tx.init(dequantize_critic_params(critic)))
+    return critic.replace(
+        opt_state=critic.tx.init(reconstruct_carry_logical_critic_params(critic))
+    )
 
 
 def initialize_target_critic(critic: Model, target_critic: Model):
     """Initialize the target state from the online parameter tree."""
     precision = _target_precision(target_critic)
-    online_params = dequantize_critic_params(critic)
+    online_params = reconstruct_carry_logical_critic_params(critic)
     if precision not in ('fp8_resident', 'fp8_lag'):
         return target_critic.replace(params=online_params)
 
@@ -114,7 +227,9 @@ def reconstruct_target_params(critic: Model, target_critic: Model):
     if precision != 'fp8_lag':
         return dequantize_target_params(target_critic)
 
-    online = traverse_util.flatten_dict(dequantize_critic_params(critic))
+    online = traverse_util.flatten_dict(
+        reconstruct_carry_logical_critic_params(critic)
+    )
     target = traverse_util.flatten_dict(target_critic.params)
     metadata = traverse_util.flatten_dict(target_critic.fp8_meta)
     reconstructed = dict(target)
@@ -139,11 +254,15 @@ def target_ema_diagnostics(
     if precision not in ('fp8_resident', 'fp8_lag'):
         return {}
 
-    online = traverse_util.flatten_dict(dequantize_critic_params(critic))
+    online = traverse_util.flatten_dict(
+        reconstruct_carry_logical_critic_params(critic)
+    )
     target = traverse_util.flatten_dict(target_critic.params)
     metadata = traverse_util.flatten_dict(target_critic.fp8_meta)
     old_online = (
-        traverse_util.flatten_dict(dequantize_critic_params(old_critic))
+        traverse_util.flatten_dict(
+            reconstruct_carry_logical_critic_params(old_critic)
+        )
         if old_critic is not None
         else online
     )
@@ -302,7 +421,7 @@ def update_actor(key: PRNGKey, actor: Model, critic: Model, temp: Model, batch: 
             '_entropy_counts_by_task': entropy_counts,
             'actor_pnorm': tree_norm(actor_variables['params']),
         }
-    if critic.fp8_meta is None or _critic_precision(critic) == 'fp8_resident':
+    if critic.fp8_meta is None:
         new_actor, info = actor.apply_gradient(actor_loss_fn)
         new_critic = critic
     else:
@@ -311,6 +430,10 @@ def update_actor(key: PRNGKey, actor: Model, critic: Model, temp: Model, batch: 
             actor.variables(), critic.fp8_meta
         )
         new_actor, info = actor.apply_variable_gradients(actor_grads, info)
+        if _critic_precision(critic) == 'fp8_resident':
+            new_fp8_meta = _merge_resident_backward_metadata(
+                critic.fp8_meta, new_fp8_meta
+            )
         new_critic = critic.replace(fp8_meta=new_fp8_meta)
     info['actor_gnorm'] = info.pop('grad_norm')
     return new_actor, new_critic, info
@@ -387,8 +510,21 @@ def _scale_code_update_components(
     return scale_only, code_only
 
 
-def _resident_parameter_write(critic, param_grads, info, collect_diagnostics):
+def _resident_parameter_write(
+    critic,
+    param_grads,
+    info,
+    collect_diagnostics,
+    backward_fp8_meta=None,
+):
+    canonicalization_enabled = _resident_fixed_anchor_enabled(critic)
+    carry_enabled = _resident_carry_enabled(critic)
+    if canonicalization_enabled and carry_enabled:
+        raise ValueError(
+            'resident carry and fixed-anchor canonicalization are mutually exclusive'
+        )
     old_physical = dequantize_critic_params(critic)
+    old_logical = reconstruct_carry_logical_critic_params(critic)
     grad_norm = tree_norm(param_grads)
     info['grad_norm'] = grad_norm
     (
@@ -400,14 +536,17 @@ def _resident_parameter_write(critic, param_grads, info, collect_diagnostics):
         critic.tx,
         param_grads,
         critic.opt_state,
-        old_physical,
+        old_logical,
         collect_diagnostics,
     )
-    candidate = optax.apply_updates(old_physical, updates)
+    candidate = optax.apply_updates(old_logical, updates)
 
     stored = traverse_util.flatten_dict(critic.params)
-    metadata = traverse_util.flatten_dict(critic.fp8_meta)
+    metadata = traverse_util.flatten_dict(
+        critic.fp8_meta if backward_fp8_meta is None else backward_fp8_meta
+    )
     old_flat = traverse_util.flatten_dict(old_physical)
+    old_logical_flat = traverse_util.flatten_dict(old_logical)
     candidate_flat = traverse_util.flatten_dict(candidate)
     adaptive_flat = (
         traverse_util.flatten_dict(adaptive_updates)
@@ -429,10 +568,82 @@ def _resident_parameter_write(critic, param_grads, info, collect_diagnostics):
             continue
         old_codes = stored[path]
         old_scale = metadata[_scale_path(path)]
-        next_codes, next_scale = _quantize_ensemble(candidate_value)
-        next_value = _dequantize_ensemble(next_codes, next_scale)
+        carry_quantization = (
+            _quantize_carry_ensemble(candidate_value)
+            if carry_enabled
+            else None
+        )
+        if carry_enabled:
+            next_codes = carry_quantization['main_codes']
+            raw_next_scale = carry_quantization['kernel_scale']
+            raw_next_value = carry_quantization['main_physical']
+            next_carry = carry_quantization['carry_codes']
+            logical_next_value = carry_quantization[
+                'logical_reconstruction'
+            ]
+        else:
+            next_codes, raw_next_scale = _quantize_ensemble(candidate_value)
+            next_carry = None
+            logical_next_value = None
+
+        if canonicalization_enabled:
+            bias_path = _bias_path(path)
+            if bias_path not in candidate_flat:
+                raise KeyError(
+                    'missing paired bias for resident kernel '
+                    f'{"/".join(path)}: expected {"/".join(bias_path)}'
+                )
+            canonical = _fixed_anchor_resident_affine(
+                candidate_flat[bias_path],
+                next_codes,
+                raw_next_scale,
+                metadata[_anchor_norm_path(path)],
+            )
+            raw_next_value = canonical['raw_next_value']
+            next_scale = canonical['canonical_scale']
+            next_value = canonical['canonical_kernel']
+            canonicalization_factor = canonical['alpha']
+            anchor_norms = canonical['anchor_norm']
+            code_norms = canonical['code_norm']
+            new_stored[bias_path] = canonical['canonical_bias']
+            new_physical[bias_path] = canonical['canonical_bias']
+        else:
+            if not carry_enabled:
+                raw_next_value = _dequantize_ensemble(
+                    next_codes, raw_next_scale
+                )
+            next_scale = raw_next_scale
+            next_value = raw_next_value
+            canonicalization_factor = jnp.ones_like(
+                raw_next_scale, dtype=jnp.float32
+            )
+            if collect_diagnostics:
+                reduce_axes = tuple(range(1, raw_next_value.ndim))
+                raw_next_norms = jnp.sqrt(
+                    jnp.sum(
+                        jnp.square(raw_next_value), axis=reduce_axes
+                    )
+                )
+                anchor_norms = jnp.zeros_like(raw_next_scale)
+                code_norms = jnp.sqrt(
+                    jnp.sum(
+                        jnp.square(next_codes.astype(jnp.float32)),
+                        axis=reduce_axes,
+                    )
+                )
+
+        if collect_diagnostics and canonicalization_enabled:
+            raw_next_norms = jnp.sqrt(
+                jnp.sum(
+                    jnp.square(raw_next_value),
+                    axis=tuple(range(1, raw_next_value.ndim)),
+                )
+            )
+
         new_stored[path] = next_codes
         new_metadata[_scale_path(path)] = next_scale
+        if carry_enabled:
+            new_metadata[_carry_path(path)] = next_carry
         new_physical[path] = next_value
 
         if not collect_diagnostics:
@@ -447,7 +658,7 @@ def _resident_parameter_write(critic, param_grads, info, collect_diagnostics):
             jnp.float32(448.0),
         ).astype(jnp.float8_e4m3fn)
         fixed_value = fixed_codes.astype(jnp.float32) * expanded_old_scale
-        intended = candidate_value - old_flat[path]
+        intended = candidate_value - old_logical_flat[path]
         applied = next_value - old_flat[path]
         scale_only, code_only = jax.vmap(
             _scale_code_update_components
@@ -455,11 +666,12 @@ def _resident_parameter_write(critic, param_grads, info, collect_diagnostics):
         layer = '/'.join(path[:-1])
         for member in range(old_codes.shape[0]):
             member_old = old_flat[path][member]
+            member_logical_old = old_logical_flat[path][member]
             member_candidate = candidate_value[member]
             member_intended = intended[member]
             member_applied = applied[member]
             member_quantization_error = (
-                next_value[member] - member_candidate
+                raw_next_value[member] - member_candidate
             )
             member_adaptive = adaptive_flat[path][member]
             member_weight_decay = weight_decay_flat[path][member]
@@ -473,13 +685,14 @@ def _resident_parameter_write(critic, param_grads, info, collect_diagnostics):
                 member_quantization_error
             )
             intended_geometry = _update_geometry(
-                member_old, member_intended
+                member_logical_old, member_intended
             )
             actual_geometry = _update_geometry(member_old, member_applied)
             wd_intended_l2 = jnp.linalg.norm(member_weight_decay)
             wd_intended_radial = jnp.where(
-                old_norm > 0,
-                jnp.vdot(member_old, member_weight_decay) / old_norm,
+                jnp.linalg.norm(member_logical_old) > 0,
+                jnp.vdot(member_logical_old, member_weight_decay)
+                / jnp.linalg.norm(member_logical_old),
                 0.0,
             )
             # Signed radial motion left after subtracting the exact adaptive
@@ -499,12 +712,13 @@ def _resident_parameter_write(critic, param_grads, info, collect_diagnostics):
             next_code = next_codes[member].astype(jnp.float32)
             old_code_norm = jnp.linalg.norm(old_code)
             next_code_norm = jnp.linalg.norm(next_code)
-            diagnostics[f'{layer}/ensemble_{member}'] = {
+            row = {
                 'intended_update_l2': intended_norm,
                 'intended_update_radial_cosine': jnp.where(
-                    (old_norm > 0) & (intended_norm > 0),
-                    jnp.vdot(member_old, member_intended)
-                    / (old_norm * intended_norm),
+                    (jnp.linalg.norm(member_logical_old) > 0)
+                    & (intended_norm > 0),
+                    jnp.vdot(member_logical_old, member_intended)
+                    / (jnp.linalg.norm(member_logical_old) * intended_norm),
                     0.0,
                 ),
                 'intended_tangential_update_l2': (
@@ -605,11 +819,72 @@ def _resident_parameter_write(critic, param_grads, info, collect_diagnostics):
                 ),
                 'dynamic_vs_fixed_relative_difference': jnp.where(
                     intended_norm > 0,
-                    jnp.linalg.norm(next_value[member] - fixed_value[member])
+                    jnp.linalg.norm(
+                        raw_next_value[member] - fixed_value[member]
+                    )
                     / intended_norm,
                     0.0,
                 ),
+                'canonicalization_factor': (
+                    canonicalization_factor[member]
+                ),
+                'fixed_anchor_kernel_norm': anchor_norms[member],
+                'code_norm': code_norms[member],
+                'pre_canonical_kernel_norm': raw_next_norms[member],
+                'post_canonical_kernel_norm': jnp.linalg.norm(
+                    next_value[member]
+                ),
+                'post_to_fixed_anchor_kernel_norm_ratio': jnp.where(
+                    anchor_norms[member] > 0,
+                    jnp.linalg.norm(next_value[member])
+                    / anchor_norms[member],
+                    0.0,
+                ),
+                'canonicalization_kernel_delta_l2': jnp.linalg.norm(
+                    next_value[member] - raw_next_value[member]
+                ),
             }
+            if carry_enabled:
+                member_logical_next = logical_next_value[member]
+                member_main_error = carry_quantization['main_error'][member]
+                member_carry_error = carry_quantization['carry_error'][member]
+                main_error_l2 = jnp.linalg.norm(member_main_error)
+                carry_error_l2 = jnp.linalg.norm(member_carry_error)
+                logical_norm = jnp.linalg.norm(member_logical_next)
+                member_carry = next_carry[member].astype(jnp.float32)
+                row.update({
+                    'carry_code_l2': jnp.linalg.norm(member_carry),
+                    'carry_zero_fraction': jnp.mean(member_carry == 0),
+                    'carry_absmax': jnp.max(jnp.abs(member_carry)),
+                    'carry_prequant_absmax': carry_quantization[
+                        'carry_prequant_absmax'
+                    ][member],
+                    'carry_saturation_fraction': carry_quantization[
+                        'carry_saturation_fraction'
+                    ][member],
+                    'main_write_relative_l2': jnp.where(
+                        candidate_norm > 0,
+                        main_error_l2 / candidate_norm,
+                        0.0,
+                    ),
+                    'logical_reconstruction_relative_l2': jnp.where(
+                        candidate_norm > 0,
+                        carry_error_l2 / candidate_norm,
+                        0.0,
+                    ),
+                    'carry_error_reduction_ratio': main_error_l2
+                    / jnp.maximum(carry_error_l2, jnp.float32(1e-12)),
+                    'physical_kernel_norm': jnp.linalg.norm(next_value[member]),
+                    'logical_kernel_norm': logical_norm,
+                    'logical_to_physical_relative_l2': jnp.where(
+                        logical_norm > 0,
+                        jnp.linalg.norm(
+                            member_logical_next - next_value[member]
+                        ) / logical_norm,
+                        0.0,
+                    ),
+                })
+            diagnostics[f'{layer}/ensemble_{member}'] = row
 
     new_critic = critic.replace(
         step=critic.step + 1,
@@ -627,12 +902,20 @@ def _resident_parameter_write(critic, param_grads, info, collect_diagnostics):
 
 def _probability_js(left, right):
     midpoint = 0.5 * (left + right)
+    tiny = jnp.finfo(left.dtype).tiny
+    safe_left = jnp.maximum(left, tiny)
+    safe_right = jnp.maximum(right, tiny)
+    safe_midpoint = jnp.maximum(midpoint, tiny)
     return jnp.maximum(
         0.5 * jnp.sum(
-            jnp.where(left > 0, left * (jnp.log(left) - jnp.log(midpoint)), 0.0)
+            jnp.where(
+                left > 0,
+                left * (jnp.log(safe_left) - jnp.log(safe_midpoint)),
+                0.0,
+            )
             + jnp.where(
                 right > 0,
-                right * (jnp.log(right) - jnp.log(midpoint)),
+                right * (jnp.log(safe_right) - jnp.log(safe_midpoint)),
                 0.0,
             ),
             axis=-1,
@@ -763,19 +1046,28 @@ def update_critic(key: PRNGKey, actor: Model, critic: Model, target_critic: Mode
     if _critic_precision(critic) == 'fp8_resident':
         physical_params = dequantize_critic_params(critic)
 
-        def physical_loss_fn(params):
-            return critic_loss_fn(critic.variables(params=params))
+        def physical_loss_fn(params, fp8_meta):
+            return critic_loss_fn(
+                critic.variables(params=params, fp8_meta=fp8_meta)
+            )
 
-        param_grads, info = jax.grad(
-            physical_loss_fn, has_aux=True
-        )(physical_params)
+        (param_grads, backward_fp8_meta), info = jax.grad(
+            physical_loss_fn, argnums=(0, 1), has_aux=True
+        )(physical_params, critic.fp8_meta)
+        backward_fp8_meta = _merge_resident_backward_metadata(
+            critic.fp8_meta, backward_fp8_meta
+        )
         (
             new_critic,
             parameter_write,
             candidate,
             resident_physical,
         ) = _resident_parameter_write(
-            critic, param_grads, info, collect_resident_diagnostics
+            critic,
+            param_grads,
+            info,
+            collect_resident_diagnostics,
+            backward_fp8_meta=backward_fp8_meta,
         )
         if collect_resident_diagnostics:
             resident_diagnostics = {
@@ -803,11 +1095,15 @@ def update_target_critic(
 ):
     precision = _target_precision(target_critic)
     if precision in ('fp8_resident', 'fp8_lag'):
-        online = traverse_util.flatten_dict(dequantize_critic_params(critic))
+        online = traverse_util.flatten_dict(
+            reconstruct_carry_logical_critic_params(critic)
+        )
         target = traverse_util.flatten_dict(target_critic.params)
         metadata = traverse_util.flatten_dict(target_critic.fp8_meta)
         old_online = (
-            traverse_util.flatten_dict(dequantize_critic_params(old_critic))
+            traverse_util.flatten_dict(
+                reconstruct_carry_logical_critic_params(old_critic)
+            )
             if old_critic is not None
             else online
         )
@@ -847,7 +1143,8 @@ def update_target_critic(
         )
 
     new_target_params = jax.tree.map(
-        lambda p, tp: p * tau + tp * (1 - tau), dequantize_critic_params(critic),
+        lambda p, tp: p * tau + tp * (1 - tau),
+        reconstruct_carry_logical_critic_params(critic),
         target_critic.params)
     return target_critic.replace(params=new_target_params)
 

@@ -4,11 +4,15 @@ from typing import Callable
 from jax import lax
 import jax.numpy as jnp
 import flax.linen as nn
+from flax.linen import fp8_ops
 from flax.linen.fp8_ops import OVERWRITE_WITH_GRADIENT, update_fp8_meta
 import distrax
 
 
 E4M3_MAX = jnp.float32(448.0)
+CARRY_GAIN = jnp.float32(16.0)
+CARRY_INV_GAIN = jnp.float32(0.0625)
+CARRY_DTYPE = jnp.float8_e4m3fn
 
 
 def _e4m3_amax_and_scale(value: jnp.ndarray):
@@ -21,13 +25,75 @@ def _e4m3_amax_and_scale(value: jnp.ndarray):
 def quantize_e4m3_per_tensor(value: jnp.ndarray):
     value = jnp.asarray(value, dtype=jnp.float32)
     _, scale = _e4m3_amax_and_scale(value)
-    return (value / scale).astype(jnp.float8_e4m3fn), scale
+    codes = (value / scale).astype(jnp.float8_e4m3fn)
+    # The stored FP8 value is an observable numerical boundary.  Without this
+    # barrier the GPU compiler can forward the pre-cast FP32 value into an
+    # immediate widening consumer, erasing the quantization residual while the
+    # returned code buffer itself is still genuinely E4M3.
+    codes = lax.optimization_barrier(codes)
+    return codes, scale
 
 
 def dequantize_e4m3(codes: jnp.ndarray, scale: jnp.ndarray):
     scale = jnp.asarray(scale, dtype=jnp.float32)
     scale = jnp.reshape(scale, scale.shape + (1,) * (codes.ndim - scale.ndim))
     return codes.astype(jnp.float32) * scale
+
+
+def _reconstruct_carry_logical_kernel(
+    main_codes: jnp.ndarray,
+    kernel_scale: jnp.ndarray,
+    carry_codes: jnp.ndarray,
+):
+    """Reconstruct s * (C + R / 16) without persistent FP32 state."""
+    scale = jnp.asarray(kernel_scale, dtype=jnp.float32)
+    scale = jnp.reshape(
+        scale, scale.shape + (1,) * (main_codes.ndim - scale.ndim)
+    )
+    normalized_logical = (
+        main_codes.astype(jnp.float32)
+        + carry_codes.astype(jnp.float32) * CARRY_INV_GAIN
+    )
+    return scale * normalized_logical
+
+
+def _quantize_carry_resident_kernel(candidate_kernel: jnp.ndarray):
+    """Quantize one resident kernel and its shared-scale E4M3 carry."""
+    candidate_kernel = jnp.asarray(candidate_kernel, dtype=jnp.float32)
+    main_codes, kernel_scale = quantize_e4m3_per_tensor(candidate_kernel)
+    main_physical = dequantize_e4m3(main_codes, kernel_scale)
+    normalized_residual = (
+        candidate_kernel / jnp.asarray(kernel_scale, dtype=jnp.float32)
+        - main_codes.astype(jnp.float32)
+    )
+    carry_prequant = normalized_residual * CARRY_GAIN
+    saturation = (~jnp.isfinite(carry_prequant)) | (
+        jnp.abs(carry_prequant) > E4M3_MAX
+    )
+    clipped = jnp.clip(carry_prequant, -E4M3_MAX, E4M3_MAX)
+    carry_codes = clipped.astype(CARRY_DTYPE)
+    # Carry is a second persistent FP8 boundary.  It needs its own barrier;
+    # otherwise a same-graph reconstruction can consume ``clipped`` directly
+    # even though the returned/stored carry buffer is genuinely E4M3.
+    carry_codes = lax.optimization_barrier(carry_codes)
+    logical_reconstruction = _reconstruct_carry_logical_kernel(
+        main_codes, kernel_scale, carry_codes
+    )
+    return {
+        'main_codes': main_codes,
+        'kernel_scale': kernel_scale,
+        'carry_codes': carry_codes,
+        'main_physical': main_physical,
+        'logical_reconstruction': logical_reconstruction,
+        'main_error': candidate_kernel - main_physical,
+        'carry_error': candidate_kernel - logical_reconstruction,
+        'carry_prequant_absmax': jnp.max(
+            jnp.abs(carry_prequant).astype(jnp.float32)
+        ),
+        'carry_saturation_fraction': jnp.mean(
+            saturation.astype(jnp.float32)
+        ),
+    }
 
 
 def default_init(scale: float = jnp.sqrt(2)):
@@ -68,6 +134,9 @@ class ResidentFp8Dense(nn.Module):
     features: int
     kernel_init: Callable = default_init()
     bias_init: Callable = nn.initializers.zeros_init()
+    fixed_anchor: bool = False
+    carry: bool = False
+    fp8_amax_history_length: int = 1024
 
     @nn.compact
     def __call__(self, inputs: jnp.ndarray):
@@ -75,11 +144,21 @@ class ResidentFp8Dense(nn.Module):
         if self.has_variable('params', 'kernel'):
             initial_kernel = jnp.zeros(kernel_shape, dtype=jnp.float8_e4m3fn)
             initial_scale = jnp.float32(1.0)
+            initial_carry = jnp.zeros(kernel_shape, dtype=CARRY_DTYPE)
         else:
             fp32_kernel = self.kernel_init(
                 self.make_rng('params'), kernel_shape, jnp.float32
             )
-            initial_kernel, initial_scale = quantize_e4m3_per_tensor(fp32_kernel)
+            if self.carry:
+                initial = _quantize_carry_resident_kernel(fp32_kernel)
+                initial_kernel = initial['main_codes']
+                initial_scale = initial['kernel_scale']
+                initial_carry = initial['carry_codes']
+            else:
+                initial_kernel, initial_scale = quantize_e4m3_per_tensor(
+                    fp32_kernel
+                )
+                initial_carry = jnp.zeros(kernel_shape, dtype=CARRY_DTYPE)
 
         kernel = self.param(
             'kernel',
@@ -92,26 +171,75 @@ class ResidentFp8Dense(nn.Module):
             'kernel_scale',
             lambda: initial_scale,
         ).value
+        if self.carry:
+            self.variable(
+                OVERWRITE_WITH_GRADIENT,
+                'kernel_carry',
+                lambda: initial_carry,
+            )
+        output_grad_scale = self.variable(
+            OVERWRITE_WITH_GRADIENT,
+            'output_grad_scale',
+            lambda: jnp.ones((1,), dtype=jnp.float32),
+        ).value
+        output_grad_amax_history = self.variable(
+            OVERWRITE_WITH_GRADIENT,
+            'output_grad_amax_history',
+            lambda: jnp.zeros(
+                (self.fp8_amax_history_length,), dtype=jnp.float32
+            ),
+        ).value
+        if self.fixed_anchor:
+            self.variable(
+                OVERWRITE_WITH_GRADIENT,
+                'kernel_anchor_norm',
+                lambda: jnp.asarray(
+                    jnp.linalg.norm(
+                        dequantize_e4m3(initial_kernel, initial_scale)
+                    ),
+                    dtype=jnp.float32,
+                ),
+            )
         bias = self.param(
             'bias', self.bias_init, (self.features,), jnp.float32
         )
 
-        if kernel.dtype != jnp.float8_e4m3fn:
-            kernel = (
-                jnp.asarray(kernel, dtype=jnp.float32)
-                / jnp.asarray(kernel_scale, dtype=jnp.float32)
-            ).astype(jnp.float8_e4m3fn)
+        kernel_scale = jnp.asarray(kernel_scale, dtype=jnp.float32)
+        if kernel.dtype == jnp.float8_e4m3fn:
+            kernel_codes = kernel
+            physical_kernel = dequantize_e4m3(kernel_codes, kernel_scale)
+        else:
+            physical_kernel = jnp.asarray(kernel, dtype=jnp.float32)
+            kernel_codes = (physical_kernel / kernel_scale).astype(
+                jnp.float8_e4m3fn
+            )
 
         inputs = jnp.asarray(inputs, dtype=jnp.float32)
         activation_amax, activation_scale = _e4m3_amax_and_scale(inputs)
         activation_codes = (inputs / activation_scale).astype(jnp.float8_e4m3fn)
-        outputs = lax.dot_general(
+        dimension_numbers = (
+            ((activation_codes.ndim - 1,), (0,)),
+            ((), ()),
+        )
+        outputs = fp8_ops.quantized_dot(
+            inputs,
             activation_codes,
-            kernel,
-            (((activation_codes.ndim - 1,), (0,)), ((), ())),
+            activation_scale,
+            physical_kernel,
+            kernel_codes,
+            kernel_scale,
+            output_grad_scale,
+            output_grad_amax_history,
+            jnp.float32,
+            dimension_numbers,
             preferred_element_type=jnp.float32,
         )
-        outputs *= activation_scale * jnp.asarray(kernel_scale, dtype=jnp.float32)
+        outputs = fp8_ops.out_dq(
+            jnp.float32,
+            activation_scale,
+            kernel_scale,
+            outputs,
+        )
         outputs += jnp.reshape(bias, (1,) * (outputs.ndim - 1) + (-1,))
 
         self.sow('intermediates', 'activation', inputs)
@@ -120,11 +248,85 @@ class ResidentFp8Dense(nn.Module):
         return outputs
 
 
+class CurrentAmaxFp8Dense(nn.Module):
+    """FP32-master Dense with resident-equivalent current-amax FP8 compute."""
+
+    features: int
+    kernel_init: Callable = default_init()
+    bias_init: Callable = nn.initializers.zeros_init()
+    fp8_amax_history_length: int = 1024
+
+    @nn.compact
+    def __call__(self, inputs: jnp.ndarray):
+        kernel = self.param(
+            'kernel',
+            self.kernel_init,
+            (inputs.shape[-1], self.features),
+            jnp.float32,
+        )
+        bias = self.param(
+            'bias', self.bias_init, (self.features,), jnp.float32
+        )
+        output_grad_scale = self.variable(
+            OVERWRITE_WITH_GRADIENT,
+            'output_grad_scale',
+            lambda: jnp.ones((1,), dtype=jnp.float32),
+        ).value
+        output_grad_amax_history = self.variable(
+            OVERWRITE_WITH_GRADIENT,
+            'output_grad_amax_history',
+            lambda: jnp.zeros(
+                (self.fp8_amax_history_length,), dtype=jnp.float32
+            ),
+        ).value
+
+        inputs = jnp.asarray(inputs, dtype=jnp.float32)
+        kernel = jnp.asarray(kernel, dtype=jnp.float32)
+        activation_amax, activation_scale = _e4m3_amax_and_scale(inputs)
+        kernel_amax, kernel_scale = _e4m3_amax_and_scale(kernel)
+        activation_codes = (inputs / activation_scale).astype(jnp.float8_e4m3fn)
+        kernel_codes = (kernel / kernel_scale).astype(jnp.float8_e4m3fn)
+        dimension_numbers = (
+            ((activation_codes.ndim - 1,), (0,)),
+            ((), ()),
+        )
+        outputs = fp8_ops.quantized_dot(
+            inputs,
+            activation_codes,
+            activation_scale,
+            kernel,
+            kernel_codes,
+            kernel_scale,
+            output_grad_scale,
+            output_grad_amax_history,
+            jnp.float32,
+            dimension_numbers,
+            preferred_element_type=jnp.float32,
+        )
+        outputs = fp8_ops.out_dq(
+            jnp.float32,
+            activation_scale,
+            kernel_scale,
+            outputs,
+        )
+        outputs += jnp.reshape(bias, (1,) * (outputs.ndim - 1) + (-1,))
+
+        self.sow('intermediates', 'activation', inputs)
+        self.sow('intermediates', 'activation_amax', activation_amax)
+        self.sow('intermediates', 'activation_scale', activation_scale)
+        self.sow('intermediates', 'kernel_amax', kernel_amax)
+        self.sow('intermediates', 'kernel_scale', kernel_scale)
+        return outputs
+
+
 class BronetBlock(nn.Module):
     hidden_dims: int
     activations: Callable[[jnp.ndarray], jnp.ndarray]
     fp8_direct: bool = False
     fp8_resident: bool = False
+    fp8_current_master: bool = False
+    fp8_resident_fixed_anchor: bool = False
+    fp8_resident_carry: bool = False
     fp8_amax_history_length: int = 1024
 
     def _dense(self, name: str):
@@ -132,6 +334,16 @@ class BronetBlock(nn.Module):
             return ResidentFp8Dense(
                 self.hidden_dims,
                 kernel_init=default_init(),
+                fixed_anchor=self.fp8_resident_fixed_anchor,
+                carry=self.fp8_resident_carry,
+                fp8_amax_history_length=self.fp8_amax_history_length,
+                name=name,
+            )
+        if self.fp8_current_master:
+            return CurrentAmaxFp8Dense(
+                self.hidden_dims,
+                kernel_init=default_init(),
+                fp8_amax_history_length=self.fp8_amax_history_length,
                 name=name,
             )
         if not self.fp8_direct:
@@ -164,6 +376,9 @@ class BroNet(nn.Module):
     activations: Callable[[jnp.ndarray], jnp.ndarray] = nn.relu
     fp8_residual_blocks: bool = False
     resident_fp8_residual_blocks: bool = False
+    current_master_fp8_residual_blocks: bool = False
+    resident_fp8_fixed_anchor: bool = False
+    resident_fp8_carry: bool = False
     fp8_amax_history_length: int = 1024
 
     @nn.compact
@@ -178,6 +393,9 @@ class BroNet(nn.Module):
                 self.activations,
                 fp8_direct=self.fp8_residual_blocks,
                 fp8_resident=self.resident_fp8_residual_blocks,
+                fp8_current_master=self.current_master_fp8_residual_blocks,
+                fp8_resident_fixed_anchor=self.resident_fp8_fixed_anchor,
+                fp8_resident_carry=self.resident_fp8_carry,
                 fp8_amax_history_length=self.fp8_amax_history_length,
             )(x)
         if self.add_final_layer:
@@ -207,6 +425,8 @@ class QValue(nn.Module):
     output_nodes: int = 101
     critic_precision: str = 'fp32'
     fp8_amax_history_length: int = 1024
+    fp8_resident_fixed_anchor: bool = False
+    fp8_resident_carry: bool = False
     
     def setup(self):
         self.critic = BroNet(
@@ -219,6 +439,11 @@ class QValue(nn.Module):
                 'fp8_direct', 'fp8_lag'
             ),
             resident_fp8_residual_blocks=self.critic_precision == 'fp8_resident',
+            current_master_fp8_residual_blocks=(
+                self.critic_precision == 'fp8_current_master'
+            ),
+            resident_fp8_fixed_anchor=self.fp8_resident_fixed_anchor,
+            resident_fp8_carry=self.fp8_resident_carry,
             fp8_amax_history_length=self.fp8_amax_history_length,
         )
 
@@ -234,11 +459,13 @@ class QValueEnsemble(nn.Module):
     output_nodes: int = 101
     critic_precision: str = 'fp32'
     fp8_amax_history_length: int = 1024
+    fp8_resident_fixed_anchor: bool = False
+    fp8_resident_carry: bool = False
     
     def setup(self):
         variable_axes = {'params': 0, 'intermediates': 0}
         if self.critic_precision in (
-            'fp8_direct', 'fp8_resident', 'fp8_lag'
+            'fp8_direct', 'fp8_resident', 'fp8_current_master', 'fp8_lag'
         ):
             variable_axes[OVERWRITE_WITH_GRADIENT] = 0
         VmapCritic = nn.vmap(QValue,
@@ -254,6 +481,8 @@ class QValueEnsemble(nn.Module):
             output_nodes=self.output_nodes,
             critic_precision=self.critic_precision,
             fp8_amax_history_length=self.fp8_amax_history_length,
+            fp8_resident_fixed_anchor=self.fp8_resident_fixed_anchor,
+            fp8_resident_carry=self.fp8_resident_carry,
         )
 
     def __call__(self, inputs: jnp.ndarray):
@@ -272,6 +501,8 @@ class Critic(nn.Module):
     task_embedding_norm: str = 'l2'
     critic_precision: str = 'fp32'
     fp8_amax_history_length: int = 1024
+    fp8_resident_canonicalization: bool = False
+    fp8_resident_carry: bool = False
     
     def setup(self):
         if self.multitask:
@@ -286,6 +517,8 @@ class Critic(nn.Module):
             output_nodes=self.output_nodes,
             critic_precision=self.critic_precision,
             fp8_amax_history_length=self.fp8_amax_history_length,
+            fp8_resident_fixed_anchor=self.fp8_resident_canonicalization,
+            fp8_resident_carry=self.fp8_resident_carry,
         )
 
     def __call__(self, observations: jnp.ndarray, actions: jnp.ndarray, task_ids: jnp.ndarray, return_embeddings: bool = False):
