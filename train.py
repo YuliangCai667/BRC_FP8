@@ -3,23 +3,21 @@ import os
 os.environ['MUJOCO_GL'] = 'egl'
 
 import time
-from pathlib import Path
 
 import jax
 import numpy as np
 from absl import app, flags
 
-from jaxrl.agent.brc_learner import BRC
+from jaxrl.agent.training_learner import TrainingBRC as BRC
 from jaxrl.checkpoint import CheckpointManager, validate_checkpoint_config
 from jaxrl.env_names import get_environment_list
 from jaxrl.envs import ParallelEnv
-from jaxrl.experiment import ExperimentRecorder, collect_jax_memory_stats, summarize_tree
+from jaxrl.experiment import ExperimentRecorder, collect_jax_memory_stats
 from jaxrl.logger import EpisodeRecorder, get_wandb_video
 from jaxrl.normalizer import RewardNormalizer
 from jaxrl.optimizers import optimizer_state_inventory
 from jaxrl.paper_alignment import resolve_paper_alignment
 from jaxrl.replay_buffer import ParallelReplayBuffer
-from jaxrl.utils import Batch
 
 
 FLAGS = flags.FLAGS
@@ -98,10 +96,6 @@ flags.DEFINE_string('run_root', 'runs', 'Root directory for local experiment dat
 flags.DEFINE_string('run_id', 'auto', 'Local run id; auto generates one.')
 flags.DEFINE_integer('metrics_interval', 1000, 'Training metric sampling interval; 0 disables.')
 flags.DEFINE_integer('metrics_flush_interval', 1000, 'Episode/local file flush interval; 0 disables.')
-flags.DEFINE_float('system_metrics_interval_sec', 10.0, 'Host/GPU monitor interval.')
-flags.DEFINE_integer('profile_interval', 25000, 'Component profiling interval; 0 disables.')
-flags.DEFINE_integer('profile_window', 10, 'Number of synchronized steps in a profiling window.')
-flags.DEFINE_integer('tensor_stats_interval', 25000, 'Tensor diagnostic interval; 0 disables.')
 flags.DEFINE_integer('analysis_checkpoint_interval', 50000, 'Parameter checkpoint interval; 0 disables.')
 flags.DEFINE_integer('recovery_checkpoint_interval', 100000, 'Recovery checkpoint interval; 0 disables.')
 flags.DEFINE_integer('keep_last_analysis_checkpoints', 2, 'Recent analysis checkpoints to retain.')
@@ -142,44 +136,17 @@ def _eval_aggregates(values, prefix):
     }
 
 
-def _save_probe_batch(path: Path, batch: Batch):
-    np.savez(
-        path,
-        observations=batch.observations,
-        actions=batch.actions,
-        rewards=batch.rewards,
-        masks=batch.masks,
-        next_observations=batch.next_observations,
-        task_ids=batch.task_ids,
-    )
-
-
-def _load_probe_batch(path: Path):
-    with np.load(path, allow_pickle=False) as data:
-        return Batch(**{field: data[field] for field in Batch._fields})
-
-
-def _profile_active(step: int):
-    if FLAGS.profile_interval <= 0 or FLAGS.profile_window <= 0:
-        return False
-    return step % FLAGS.profile_interval < FLAGS.profile_window
-
-
 def main(_):
     program_start = time.perf_counter()
     interval_flags = {
         'metrics_interval': FLAGS.metrics_interval,
         'metrics_flush_interval': FLAGS.metrics_flush_interval,
-        'profile_interval': FLAGS.profile_interval,
-        'tensor_stats_interval': FLAGS.tensor_stats_interval,
         'analysis_checkpoint_interval': FLAGS.analysis_checkpoint_interval,
         'recovery_checkpoint_interval': FLAGS.recovery_checkpoint_interval,
     }
     for name, value in interval_flags.items():
         if value < 0:
             raise ValueError(f'--{name} must be >= 0')
-    if FLAGS.profile_interval > 0 and not 0 < FLAGS.profile_window < FLAGS.profile_interval:
-        raise ValueError('--profile_window must be > 0 and smaller than --profile_interval')
     if FLAGS.batch_size <= 0 or FLAGS.max_steps <= 0 or FLAGS.replay_buffer_size <= 0:
         raise ValueError('batch_size, max_steps, and replay_buffer_size must be positive')
     if FLAGS.fp8_amax_history_length <= 0:
@@ -213,6 +180,7 @@ def main(_):
     )
     config = FLAGS.flag_values_dict()
     config.update({
+        'training_runtime': 'pure_training_v1',
         'carry_gain': 16.0,
         'optimizer_moment_block_size': 128,
         'optimizer_moment_carry_gain': 16.0,
@@ -408,7 +376,7 @@ def main(_):
         seed=FLAGS.seed,
         run_id=requested_run_id,
         wandb_run=wandb_run,
-        system_metrics_interval_sec=FLAGS.system_metrics_interval_sec,
+        system_metrics_interval_sec=0,
         existing_run_dir=existing_run_dir,
         start_monotonic=program_start,
     )
@@ -506,36 +474,20 @@ def main(_):
 
         first_update_sec = None
         latest_update_info = None
-        latest_normalized_rewards = None
         best_eval_success = -np.inf
-        profile_samples = []
-        completed_profile = {}
-        probe_batch = None
-        probe_path = recorder.run_dir / 'artifacts' / 'probe_batch.npz'
-        if probe_path.exists():
-            probe_batch = _load_probe_batch(probe_path)
-
         window_start = time.perf_counter()
         window_start_step = env_step
 
         for i in range(env_step + 1, FLAGS.max_steps + 1):
             env_step = i
-            profiling = _profile_active(i) and i >= FLAGS.start_training
-            profile = {}
 
-            start = time.perf_counter()
             actions = (
                 env.action_space.sample()
                 if i < FLAGS.start_training
                 else agent.sample_actions(observations, temperature=1.0)
             )
-            if profiling:
-                profile['action_sample_sec'] = time.perf_counter() - start
 
-            start = time.perf_counter()
             next_observations, rewards, terms, truns, goals = env.step(actions)
-            if profiling:
-                profile['env_step_sec'] = time.perf_counter() - start
 
             bootstrap_values = None
             bootstrap_values_normalized = None
@@ -568,36 +520,21 @@ def main(_):
             observations, terms, truns = env.reset_where_done(observations, terms, truns)
 
             if i >= FLAGS.start_training:
-                start = time.perf_counter()
                 batches = replay_buffer.sample(FLAGS.batch_size, FLAGS.updates_per_step)
                 batches = reward_normalizer.normalize(
                     batches,
                     agent.get_temperature(),
                     task_entropies=agent.get_task_entropies(),
                 )
-                latest_normalized_rewards = batches.rewards
-                if profiling:
-                    profile['replay_sample_sec'] = time.perf_counter() - start
 
                 start = time.perf_counter()
                 latest_update_info = agent.update(
                     batches,
                     FLAGS.updates_per_step,
                     i,
-                    collect_update_diagnostics=(
-                        (
-                            FLAGS.critic_precision == 'fp8_resident'
-                            or FLAGS.target_critic_precision in (
-                                'fp8_resident', 'fp8_lag'
-                            )
-                        )
-                        and FLAGS.tensor_stats_interval > 0
-                        and i % FLAGS.tensor_stats_interval == 0
-                    ),
                 )
-                if first_update_sec is None or profiling:
-                    _block_tree(latest_update_info)
                 if first_update_sec is None:
+                    _block_tree(latest_update_info)
                     first_update_sec = time.perf_counter() - start
                     recorder.record_event(
                         'first_update_finished', i, agent.step,
@@ -605,16 +542,6 @@ def main(_):
                     )
                     window_start = time.perf_counter()
                     window_start_step = i
-                if profiling:
-                    profile['update_sec'] = time.perf_counter() - start
-                    profile_samples.append(profile)
-                    if i % FLAGS.profile_interval == FLAGS.profile_window - 1:
-                        completed_profile = {
-                            f'profile_{key[:-4]}_ms': 1000.0 * np.mean([row[key] for row in profile_samples])
-                            for key in profile_samples[0]
-                        }
-                        completed_profile['profile_samples'] = len(profile_samples)
-                        profile_samples = []
 
             metrics_due = FLAGS.metrics_interval > 0 and i % FLAGS.metrics_interval == 0
             if metrics_due:
@@ -627,33 +554,7 @@ def main(_):
                 train_metrics = {
                     **(_host_metrics(latest_update_info) if latest_update_info is not None else {}),
                     **episode_summary,
-                    **completed_profile,
                     'replay_buffer_size': replay_buffer.size,
-                    'reward_raw_mean': float(np.mean(rewards)),
-                    'reward_raw_std': float(np.std(rewards)),
-                    'reward_raw_by_task': np.asarray(rewards),
-                    'action_mean': float(np.mean(actions)),
-                    'action_std': float(np.std(actions)),
-                    'action_saturation_fraction': float(np.mean(np.abs(actions) >= 0.99)),
-                    'fp8_direct_enabled': float(FLAGS.critic_precision == 'fp8_direct'),
-                    'fp8_resident_enabled': float(
-                        FLAGS.critic_precision == 'fp8_resident'
-                    ),
-                    'fp8_resident_carry_enabled': float(
-                        FLAGS.fp8_resident_carry
-                    ),
-                    'fp8_current_master_enabled': float(
-                        FLAGS.critic_precision == 'fp8_current_master'
-                    ),
-                    'target_fp8_direct_enabled': float(
-                        FLAGS.target_critic_precision == 'fp8_direct'
-                    ),
-                    'target_fp8_resident_enabled': float(
-                        FLAGS.target_critic_precision == 'fp8_resident'
-                    ),
-                    'target_fp8_lag_enabled': float(
-                        FLAGS.target_critic_precision == 'fp8_lag'
-                    ),
                     'window_train_sec': active_sec,
                     'env_steps_per_sec': active_steps / active_sec,
                     'transitions_per_sec': active_steps * num_tasks / active_sec,
@@ -661,20 +562,8 @@ def main(_):
                     'jit_and_first_update_sec': first_update_sec if first_update_sec is not None else np.nan,
                     **collect_jax_memory_stats(resource_devices),
                 }
-                train_metrics.update(reward_normalizer.diagnostics(
-                    agent.get_temperature(), agent.get_task_entropies()
-                ))
-                train_metrics['task_entropy_batch_count_by_task'] = np.asarray(
-                    agent.task_entropy_counts
-                )
-                if latest_normalized_rewards is not None:
-                    train_metrics.update(
-                        reward_normalized_mean=float(np.mean(latest_normalized_rewards)),
-                        reward_normalized_std=float(np.std(latest_normalized_rewards)),
-                    )
                 recorder.record_train(i, agent.step, train_metrics)
                 recorder.flush(agent.step)
-                completed_profile = {}
                 print(
                     f"step={i} transitions={i * num_tasks} "
                     f"throughput={train_metrics['transitions_per_sec']:.1f}/s "
@@ -722,41 +611,6 @@ def main(_):
                         wandb_run.log({'env_step': i, 'eval/renders': get_wandb_video(renders)})
                     except Exception as error:
                         recorder.record_event('video_log_failed', i, agent.step, error=str(error))
-
-            if (
-                FLAGS.tensor_stats_interval > 0
-                and i >= FLAGS.start_training
-                and i % FLAGS.tensor_stats_interval == 0
-            ):
-                maintenance_performed = True
-                tensor_start = time.perf_counter()
-                try:
-                    if probe_batch is None:
-                        probe_batch = replay_buffer.make_probe_batch(
-                            batch_size=min(256, FLAGS.batch_size), seed=FLAGS.seed + 9173
-                        )
-                        _save_probe_batch(probe_path, probe_batch)
-                    normalized_probe = reward_normalizer.normalize(
-                        probe_batch,
-                        agent.get_temperature(),
-                        task_entropies=agent.get_task_entropies(),
-                    )
-                    diagnostic_trees = agent.get_tensor_diagnostics(normalized_probe)
-                    tensor_stats = {}
-                    for category, tree in diagnostic_trees.items():
-                        tensor_stats.update(summarize_tree(tree, prefix=category))
-                    tensor_stats.update(recorder.collect_registered_tensor_stats(
-                        agent=agent, batch=normalized_probe, env_step=i
-                    ))
-                    recorder.record_tensor_stats(i, agent.step, tensor_stats)
-                    recorder.record_event(
-                        'tensor_stats_finished', i, agent.step,
-                        tensor_count=len(tensor_stats),
-                        tensor_stats_sec=time.perf_counter() - tensor_start,
-                    )
-                except Exception as error:
-                    recorder.record_event('tensor_stats_failed', i, agent.step, error=str(error))
-                    print(f'[recorder] warning: tensor statistics failed: {error}')
 
             new_best = eval_success is not None and eval_success > best_eval_success
             if new_best:

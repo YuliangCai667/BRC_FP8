@@ -37,12 +37,10 @@ fi
 
 if [[ -z "$resume_from" && "$max_steps" -le 5001 ]]; then
   run_id="brc_dmc_dogs_online_fp8_resident_carry_e4m3_g16_smoke${tag_segment}_s${seed}-$(date +%Y%m%d-%H%M%S)"
-  tensor_stats_interval=${BRC_TENSOR_STATS_INTERVAL:-5000}
   analysis_checkpoint_interval=${BRC_ANALYSIS_CHECKPOINT_INTERVAL:-5000}
   recovery_checkpoint_interval=${BRC_RECOVERY_CHECKPOINT_INTERVAL:-5000}
 else
   run_id="brc_dmc_dogs_online_fp8_resident_carry_e4m3_g16${tag_segment}_s${seed}"
-  tensor_stats_interval=${BRC_TENSOR_STATS_INTERVAL:-25000}
   analysis_checkpoint_interval=${BRC_ANALYSIS_CHECKPOINT_INTERVAL:-50000}
   recovery_checkpoint_interval=${BRC_RECOVERY_CHECKPOINT_INTERVAL:-100000}
 fi
@@ -78,10 +76,6 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false \
   --run_id="$run_id" \
   --metrics_interval=1000 \
   --metrics_flush_interval=1000 \
-  --system_metrics_interval_sec=10 \
-  --profile_interval=25000 \
-  --profile_window=10 \
-  --tensor_stats_interval="$tensor_stats_interval" \
   --analysis_checkpoint_interval="$analysis_checkpoint_interval" \
   --recovery_checkpoint_interval="$recovery_checkpoint_interval" \
   --keep_last_analysis_checkpoints=2 \
