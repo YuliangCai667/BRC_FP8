@@ -24,6 +24,7 @@ from jaxrl.agent.update import (
 )
 
 from jaxrl.networks import NormalTanhPolicy, Critic, Temperature
+from jaxrl.optimizers import MOMENT_MODES, stored_adamw, moment_diagnostics
 from jaxrl.utils import Model, PRNGKey, Batch
 
 
@@ -452,7 +453,14 @@ class BRC(object):
         fp8_amax_history_length: int = 1024,
         fp8_resident_canonicalization: bool = False,
         fp8_resident_carry: bool = False,
+        critic_optimizer_state: str = 'fp32',
     ) -> None:
+        if critic_optimizer_state not in MOMENT_MODES:
+            raise ValueError(f'Unknown critic_optimizer_state: {critic_optimizer_state}')
+        if critic_optimizer_state != 'fp32' and (
+            critic_precision != 'fp8_resident' or not fp8_resident_carry
+        ):
+            raise ValueError('compressed critic_optimizer_state requires resident CARRY weights')
         if fp8_resident_carry and critic_precision != 'fp8_resident':
             raise ValueError(
                 'fp8_resident_carry requires critic_precision=fp8_resident'
@@ -476,6 +484,7 @@ class BRC(object):
         self.fp8_amax_history_length = fp8_amax_history_length
         self.fp8_resident_canonicalization = fp8_resident_canonicalization
         self.fp8_resident_carry = fp8_resident_carry
+        self.critic_optimizer_state = critic_optimizer_state
         
         self.num_tasks = num_tasks
         self.embedding_size = embedding_size
@@ -534,7 +543,11 @@ class BRC(object):
             critic = Model.create(
                 critic_def,
                 inputs=[critic_key, observations, actions, task_ids_init],
-                tx=optax.adamw(learning_rate=critic_lr),
+                tx=(
+                    optax.adamw(learning_rate=critic_lr)
+                    if critic_optimizer_state == 'fp32'
+                    else stored_adamw(critic_lr, mode=critic_optimizer_state)
+                ),
                 reference_apply_fn=critic_reference_def,
             )
             critic = initialize_critic_optimizer(critic)
@@ -799,6 +812,8 @@ class BRC(object):
                     self.last_target_ema_diagnostics
                 )
             diagnostics['fp8_target_storage'] = target_storage
+        if self.critic_optimizer_state != 'fp32':
+            diagnostics['critic_moments'] = moment_diagnostics(self.critic.opt_state)
         if self.target_critic_precision == 'fp8_lag':
             target_params_flat = traverse_util.flatten_dict(
                 self.target_critic.params, sep='/'

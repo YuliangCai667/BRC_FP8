@@ -16,6 +16,7 @@ from jaxrl.envs import ParallelEnv
 from jaxrl.experiment import ExperimentRecorder, collect_jax_memory_stats, summarize_tree
 from jaxrl.logger import EpisodeRecorder, get_wandb_video
 from jaxrl.normalizer import RewardNormalizer
+from jaxrl.optimizers import optimizer_state_inventory
 from jaxrl.paper_alignment import resolve_paper_alignment
 from jaxrl.replay_buffer import ParallelReplayBuffer
 from jaxrl.utils import Batch
@@ -56,6 +57,10 @@ flags.DEFINE_boolean(
     'fp8_resident_carry',
     False,
     'Persist one shared-scale E4M3 carry code per resident kernel element.',
+)
+flags.DEFINE_enum(
+    'critic_optimizer_state', 'fp32', ['fp32', 'bf16', 'fp8', 'fp8_carry'],
+    'Adam moment storage for the four residual kernels; arithmetic stays FP32.',
 )
 flags.DEFINE_enum(
     'target_critic_precision', 'fp32',
@@ -209,6 +214,8 @@ def main(_):
     config = FLAGS.flag_values_dict()
     config.update({
         'carry_gain': 16.0,
+        'optimizer_moment_block_size': 128,
+        'optimizer_moment_carry_gain': 16.0,
         'carry_dtype': 'float8_e4m3fn',
         'resolved_fp8_code_materialization': (
             'optimization_barrier_after_e4m3_cast_v1'
@@ -262,7 +269,10 @@ def main(_):
             if FLAGS.critic_precision == 'fp8_resident'
             else 'persistent_fp32_parameters'
         ),
-        'resolved_online_optimizer_state': 'fp32_adamw',
+        'resolved_online_optimizer_state': (
+            'fp32_adamw' if FLAGS.critic_optimizer_state == 'fp32'
+            else f'{FLAGS.critic_optimizer_state}_residual_moments_fp32_adamw'
+        ),
         'resolved_online_fp8_backward': (
             'scale_aware_e5m2_delayed_amax_custom_vjp'
             if FLAGS.critic_precision in (
@@ -438,6 +448,7 @@ def main(_):
                 FLAGS.fp8_resident_canonicalization
             ),
             fp8_resident_carry=FLAGS.fp8_resident_carry,
+            critic_optimizer_state=FLAGS.critic_optimizer_state,
         )
         resource_devices = tuple(jax.devices())
         replay_buffer = ParallelReplayBuffer(
@@ -490,6 +501,7 @@ def main(_):
             'initialization_finished', env_step, agent.step,
             initialization_sec=initialization_sec,
             resumed=resume_checkpoint is not None,
+            critic_optimizer_inventory=optimizer_state_inventory(agent.critic.opt_state),
         )
 
         first_update_sec = None
@@ -817,6 +829,7 @@ def main(_):
             recorder.record_event(
                 'final_checkpoints_finished', env_step, agent.step,
                 checkpoint_sec=time.perf_counter() - final_start,
+                **collect_jax_memory_stats(resource_devices),
             )
         except Exception as error:
             recorder.record_event('final_checkpoint_failed', env_step, agent.step, error=str(error))

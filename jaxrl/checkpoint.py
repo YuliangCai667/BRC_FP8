@@ -23,6 +23,8 @@ RESUME_CONFIG_KEYS = [
     "resolved_entropy_correction", "critic_precision", "target_critic_precision",
     "fp8_amax_history_length", "fp8_resident_canonicalization",
     "fp8_resident_carry", "carry_gain", "carry_dtype",
+    "critic_optimizer_state", "optimizer_moment_block_size",
+    "optimizer_moment_carry_gain", "resolved_online_optimizer_state",
     "resolved_fp8_resident_state",
     "resolved_fp8_code_materialization",
     "resolved_online_fp8_canonicalization", "resolved_online_fp8_backward",
@@ -31,6 +33,14 @@ RESUME_CONFIG_KEYS = [
 
 def checkpoint_config_value(config: Mapping[str, Any], key: str):
     """Interpret protocol fields missing from historical checkpoints."""
+    if key == "critic_optimizer_state":
+        return config.get(key, "fp32")
+    if key == "optimizer_moment_block_size":
+        return config.get(key, 128)
+    if key == "optimizer_moment_carry_gain":
+        return config.get(key, 16.0)
+    if key == "resolved_online_optimizer_state":
+        return config.get(key, "fp32_adamw")
     if key == "metaworld_reset_mode":
         return config.get(key, "frozen")
     if key == "eval_seed_offset":
@@ -325,6 +335,7 @@ class CheckpointManager:
         return report
 
     def _base_manifest(self, kind: str, env_step: int, agent, **fields):
+        from jaxrl.optimizers import optimizer_state_inventory
         models = [agent.actor, agent.critic, agent.target_critic, agent.temp]
         parameter_dtypes = sorted({str(leaf.dtype) for model in models
                                    for leaf in __import__('jax').tree_util.tree_leaves(model.params)})
@@ -411,6 +422,10 @@ class CheckpointManager:
                 ),
             },
             "config": self.config,
+            "critic_optimizer_inventory": (
+                optimizer_state_inventory(agent.critic.opt_state)
+                if fields.get("includes_optimizer") else None
+            ),
             **fields,
         }
 

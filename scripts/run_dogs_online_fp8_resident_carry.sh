@@ -16,6 +16,7 @@ max_steps=${3:-500000}
 resume_from=${4:-}
 log_to_wandb=${BRC_LOG_TO_WANDB:-true}
 target_critic_precision=${BRC_TARGET_CRITIC_PRECISION:-fp8_direct}
+optimizer_state=${BRC_CRITIC_OPTIMIZER_STATE:-fp32}
 run_tag=${BRC_RUN_TAG:-}
 tag_segment=
 if [[ "$target_critic_precision" != "fp8_direct" && "$target_critic_precision" != "fp8_lag" ]]; then
@@ -61,6 +62,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false \
   --width_critic=4096 \
   --critic_precision=fp8_resident \
   --fp8_resident_carry=true \
+  --critic_optimizer_state="$optimizer_state" \
   --fp8_resident_canonicalization=false \
   --target_critic_precision="$target_critic_precision" \
   --fp8_amax_history_length=1024 \
