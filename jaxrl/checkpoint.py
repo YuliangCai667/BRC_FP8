@@ -17,12 +17,17 @@ import numpy as np
 CHECKPOINT_SCHEMA_VERSION = 1
 
 RESUME_CONFIG_KEYS = [
+    "critic_residual_compute_format", "critic_residual_compute_terms",
+    "critic_residual_compute_rounding", "critic_residual_compute_rht",
+    "method_version", "kernel_build_hash", "dependency_manifest_hash",
     "env_names", "seed", "width_critic", "updates_per_step", "batch_size",
     "replay_buffer_size", "metaworld_reset_mode", "eval_seed_offset",
     "resolved_task_embedding_norm", "resolved_return_bootstrap",
     "resolved_entropy_correction", "critic_precision", "target_critic_precision",
     "fp8_amax_history_length", "fp8_resident_canonicalization",
     "fp8_resident_carry", "carry_gain", "carry_dtype",
+    "fp8_all_dense_kernels", "fp8_input_dense_kernel",
+    "fp8_output_dense_kernel",
     "critic_optimizer_state", "optimizer_moment_block_size",
     "optimizer_moment_carry_gain", "resolved_online_optimizer_state",
     "resolved_fp8_resident_state",
@@ -54,6 +59,12 @@ def checkpoint_config_value(config: Mapping[str, Any], key: str):
     if key == "fp8_resident_canonicalization":
         return config.get(key, False)
     if key == "fp8_resident_carry":
+        return config.get(key, False)
+    if key in (
+        "fp8_all_dense_kernels",
+        "fp8_input_dense_kernel",
+        "fp8_output_dense_kernel",
+    ):
         return config.get(key, False)
     if key == "carry_gain":
         return config.get(key, 16.0)
@@ -356,8 +367,7 @@ class CheckpointManager:
         )
         resident_main_code_bytes = _tree_nbytes_at_paths(
             agent.critic.params,
-            lambda path: path[-1] == "kernel"
-            and any(part.startswith("BronetBlock_") for part in path),
+            lambda path: path[-1] == "kernel",
             lambda dtype: str(dtype) == "float8_e4m3fn",
         )
         resident_carry_code_bytes = _tree_nbytes_at_paths(

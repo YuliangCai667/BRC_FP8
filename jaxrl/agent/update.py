@@ -14,11 +14,35 @@ from jaxrl.networks import (
 from jaxrl.utils import Batch, Model, PRNGKey, tree_norm
 
 
-def _is_resident_kernel(path):
+def _is_resident_kernel(path, model=None):
+    # Offline residual-only callers predate model-dependent edge-layer scopes.
+    apply_fn = getattr(model, 'apply_fn', None)
+    all_dense = bool(
+        getattr(apply_fn, 'fp8_all_dense_kernels', False)
+    )
+    input_dense = all_dense or bool(
+        getattr(apply_fn, 'fp8_input_dense_kernel', False)
+    )
+    output_dense = all_dense or bool(
+        getattr(apply_fn, 'fp8_output_dense_kernel', False)
+    )
+    in_residual_block = any(
+        part.startswith('BronetBlock_') for part in path
+    )
     return (
         path[-1] == 'kernel'
         and path[-2].startswith('Dense_')
-        and any(part.startswith('BronetBlock_') for part in path)
+        and (
+            in_residual_block
+            or (
+                not in_residual_block
+                and 'critic' in path
+                and (
+                    (input_dense and path[-2] == 'Dense_0')
+                    or (output_dense and path[-2] == 'Dense_1')
+                )
+            )
+        )
     )
 
 
@@ -140,7 +164,7 @@ def dequantize_critic_params(critic: Model):
     metadata = traverse_util.flatten_dict(critic.fp8_meta)
     physical = dict(params)
     for path, value in params.items():
-        if _is_resident_kernel(path):
+        if _is_resident_kernel(path, critic):
             physical[path] = _dequantize_ensemble(
                 value, metadata[_scale_path(path)]
             )
@@ -159,7 +183,7 @@ def reconstruct_carry_logical_critic_params(critic: Model):
     metadata = traverse_util.flatten_dict(critic.fp8_meta)
     logical = dict(params)
     for path, value in params.items():
-        if _is_resident_kernel(path):
+        if _is_resident_kernel(path, critic):
             logical[path] = _reconstruct_carry_logical_ensemble(
                 value,
                 metadata[_scale_path(path)],
@@ -188,7 +212,7 @@ def initialize_target_critic(critic: Model, target_critic: Model):
     metadata = traverse_util.flatten_dict(target_critic.fp8_meta)
     target_params = dict(params)
     for path, value in params.items():
-        if _is_resident_kernel(path):
+        if _is_resident_kernel(path, target_critic):
             if precision == 'fp8_resident':
                 codes, scale = _quantize_ensemble(value)
                 metadata_path = _scale_path(path)
@@ -213,7 +237,7 @@ def dequantize_target_params(target_critic: Model):
     metadata = traverse_util.flatten_dict(target_critic.fp8_meta)
     dequantized = dict(params)
     for path, value in params.items():
-        if _is_resident_kernel(path):
+        if _is_resident_kernel(path, target_critic):
             dequantized[path] = _dequantize_ensemble(
                 value, metadata[_scale_path(path)]
             )
@@ -234,7 +258,7 @@ def reconstruct_target_params(critic: Model, target_critic: Model):
     metadata = traverse_util.flatten_dict(target_critic.fp8_meta)
     reconstructed = dict(target)
     for path, value in target.items():
-        if _is_resident_kernel(path):
+        if _is_resident_kernel(path, target_critic):
             lag = _dequantize_ensemble(
                 value, metadata[_lag_scale_path(path)]
             )
@@ -268,7 +292,7 @@ def target_ema_diagnostics(
     )
     diagnostics = {}
     for path, online_value in online.items():
-        if not _is_resident_kernel(path):
+        if not _is_resident_kernel(path, target_critic):
             continue
         codes = target[path]
         if precision == 'fp8_resident':
@@ -431,9 +455,10 @@ def update_actor(key: PRNGKey, actor: Model, critic: Model, temp: Model, batch: 
         )
         new_actor, info = actor.apply_variable_gradients(actor_grads, info)
         if _critic_precision(critic) == 'fp8_resident':
-            new_fp8_meta = _merge_resident_backward_metadata(
-                critic.fp8_meta, new_fp8_meta
-            )
+            if getattr(critic.apply_fn, 'critic_residual_compute_format', 'legacy') == 'legacy':
+                new_fp8_meta = _merge_resident_backward_metadata(critic.fp8_meta, new_fp8_meta)
+            else:
+                new_fp8_meta = critic.fp8_meta
         new_critic = critic.replace(fp8_meta=new_fp8_meta)
     info['actor_gnorm'] = info.pop('grad_norm')
     return new_actor, new_critic, info
@@ -564,7 +589,7 @@ def _resident_parameter_write(
     diagnostics = {}
 
     for path, candidate_value in candidate_flat.items():
-        if not _is_resident_kernel(path):
+        if not _is_resident_kernel(path, critic):
             continue
         old_codes = stored[path]
         old_scale = metadata[_scale_path(path)]
@@ -1054,9 +1079,10 @@ def update_critic(key: PRNGKey, actor: Model, critic: Model, target_critic: Mode
         (param_grads, backward_fp8_meta), info = jax.grad(
             physical_loss_fn, argnums=(0, 1), has_aux=True
         )(physical_params, critic.fp8_meta)
-        backward_fp8_meta = _merge_resident_backward_metadata(
-            critic.fp8_meta, backward_fp8_meta
-        )
+        if getattr(critic.apply_fn, 'critic_residual_compute_format', 'legacy') == 'legacy':
+            backward_fp8_meta = _merge_resident_backward_metadata(critic.fp8_meta, backward_fp8_meta)
+        else:
+            backward_fp8_meta = critic.fp8_meta
         (
             new_critic,
             parameter_write,
@@ -1111,7 +1137,7 @@ def update_target_critic(
         new_metadata = dict(metadata)
         for path, online_value in online.items():
             target_value = target[path]
-            if _is_resident_kernel(path):
+            if _is_resident_kernel(path, target_critic):
                 if precision == 'fp8_resident':
                     old_value = _dequantize_ensemble(
                         target_value, metadata[_scale_path(path)]

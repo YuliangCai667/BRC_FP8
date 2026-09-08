@@ -3,6 +3,7 @@ import os
 os.environ['MUJOCO_GL'] = 'egl'
 
 import time
+import json
 from pathlib import Path
 
 import jax
@@ -38,6 +39,10 @@ flags.DEFINE_integer('start_training', 5000, 'Number of steps before training st
 flags.DEFINE_string('env_names', 'cheetah-run', 'Environment name or named task group.')
 flags.DEFINE_boolean('log_to_wandb', True, 'Whether to mirror metrics to W&B.')
 flags.DEFINE_string('wandb_name', 'auto', 'W&B display name; auto uses the seed.')
+flags.DEFINE_enum('critic_residual_compute_format', 'legacy', ['legacy', 'mxfp8'], 'Online residual native compute format.')
+flags.DEFINE_enum('critic_residual_compute_terms', 'main_plus_carry', ['main_plus_carry'], 'V1 two-term operator.')
+flags.DEFINE_enum('critic_residual_compute_rounding', 'rtn', ['rtn'], 'Deterministic compute operand rounding.')
+flags.DEFINE_boolean('critic_residual_compute_rht', False, 'Must be false for V1.')
 flags.DEFINE_boolean('offline_evaluation', True, 'Whether to perform deterministic evaluations.')
 flags.DEFINE_boolean('render', True, 'Whether to log evaluation videos.')
 flags.DEFINE_integer('updates_per_step', 2, 'Number of updates per environment step.')
@@ -61,6 +66,24 @@ flags.DEFINE_boolean(
 flags.DEFINE_enum(
     'critic_optimizer_state', 'fp32', ['fp32', 'bf16', 'fp8', 'fp8_carry'],
     'Adam moment storage for the four residual kernels; arithmetic stays FP32.',
+)
+flags.DEFINE_boolean(
+    'fp8_all_dense_kernels',
+    False,
+    'Extend selected online and target FP8 modes to the input and '
+    'distributional-output Dense kernels.',
+)
+flags.DEFINE_boolean(
+    'fp8_input_dense_kernel',
+    False,
+    'Extend selected online and target FP8 modes to the critic input Dense '
+    'kernel.',
+)
+flags.DEFINE_boolean(
+    'fp8_output_dense_kernel',
+    False,
+    'Extend selected online and target FP8 modes to the critic '
+    'distributional-output Dense kernel.',
 )
 flags.DEFINE_enum(
     'target_critic_precision', 'fp32',
@@ -165,6 +188,22 @@ def _profile_active(step: int):
     return step % FLAGS.profile_interval < FLAGS.profile_window
 
 
+def _fp8_dense_scope():
+    input_dense = (
+        FLAGS.fp8_all_dense_kernels or FLAGS.fp8_input_dense_kernel
+    )
+    output_dense = (
+        FLAGS.fp8_all_dense_kernels or FLAGS.fp8_output_dense_kernel
+    )
+    if input_dense and output_dense:
+        return 'all_dense_kernels'
+    if input_dense:
+        return 'residual_and_input_dense_kernels'
+    if output_dense:
+        return 'residual_and_output_dense_kernels'
+    return 'residual_dense_kernels'
+
+
 def main(_):
     program_start = time.perf_counter()
     interval_flags = {
@@ -211,7 +250,24 @@ def main(_):
         FLAGS.return_bootstrap,
         FLAGS.entropy_correction,
     )
+    if FLAGS.critic_residual_compute_rht:
+        raise ValueError('V1 fixes RHT off')
     config = FLAGS.flag_values_dict()
+    if FLAGS.critic_residual_compute_format != 'legacy':
+        from jaxrl.low_precision.backends.native import register
+        import importlib.metadata
+        import hashlib
+        dependencies = {name: importlib.metadata.version(name) for name in ('jax','jaxlib','flax','optax')}
+        config.update(method_version=1,
+                      online_residual_compute_format=FLAGS.critic_residual_compute_format,
+                      online_residual_compute_terms='main_plus_carry',
+                      online_residual_compute_rounding='rtn', online_residual_compute_rht=False,
+                      online_residual_nvfp4_weight_scaling='1d',
+                      weight_state_codec='carry_e4m3_gain16',
+                      optimizer_state_codec='dual_fp8_m_v_block128_gain16', target_state_codec='lag',
+                      kernel_build_hash=register()[1],
+                      dependency_manifest=dependencies,
+                      dependency_manifest_hash=hashlib.sha256(json.dumps(dependencies,sort_keys=True).encode()).hexdigest())
     config.update({
         'carry_gain': 16.0,
         'optimizer_moment_block_size': 128,
@@ -222,24 +278,30 @@ def main(_):
         ),
     })
     config.update({f'resolved_{key}': value for key, value in resolved_alignment.items()})
+    fp8_dense_scope = _fp8_dense_scope()
+    fp8_lag_scope = fp8_dense_scope.replace('_kernels', '_lag_state')
     config.update({
         'resolved_online_fp8_compute_scope': (
-            'residual_dense_kernels'
+            fp8_dense_scope
             if FLAGS.critic_precision in (
                 'fp8_direct', 'fp8_resident', 'fp8_current_master'
             )
             else 'none'
         ),
         'resolved_online_fp8_storage_scope': (
-            'residual_dense_kernels'
+            fp8_dense_scope
             if FLAGS.critic_precision == 'fp8_resident'
             else 'none'
         ),
         'resolved_online_parameter_storage': (
             (
-                'e4m3_main_and_e4m3_carry_residual_dense_kernels_otherwise_fp32'
+                (
+                    f'e4m3_main_and_e4m3_carry_{fp8_dense_scope}_otherwise_fp32'
+                )
                 if FLAGS.fp8_resident_carry
-                else 'e4m3_residual_dense_kernels_otherwise_fp32'
+                else (
+                    f'e4m3_{fp8_dense_scope}_otherwise_fp32'
+                )
             )
             if FLAGS.critic_precision == 'fp8_resident'
             else 'fp32_all_parameters'
@@ -295,22 +357,23 @@ def main(_):
     )
     config.update({
         'resolved_target_fp8_compute_scope': (
-            'residual_dense_kernels' if target_fp8_compute else 'none'
+            fp8_dense_scope
+            if target_fp8_compute else 'none'
         ),
         'resolved_target_fp8_storage_scope': (
-            'residual_dense_kernels'
+            fp8_dense_scope
             if FLAGS.target_critic_precision == 'fp8_resident'
             else (
-                'residual_dense_lag_state'
+                fp8_lag_scope
                 if FLAGS.target_critic_precision == 'fp8_lag'
                 else 'none'
             )
         ),
         'resolved_target_parameter_storage': (
-            'e4m3_residual_dense_kernels_otherwise_fp32'
+            f'e4m3_{fp8_dense_scope}_otherwise_fp32'
             if FLAGS.target_critic_precision == 'fp8_resident'
             else (
-                'e4m3_lag_residual_dense_kernels_otherwise_fp32'
+                f'e4m3_lag_{fp8_dense_scope}_otherwise_fp32'
                 if FLAGS.target_critic_precision == 'fp8_lag'
                 else 'fp32_all_parameters'
             )
@@ -358,6 +421,16 @@ def main(_):
             else 'none'
         ),
     })
+    if FLAGS.critic_residual_compute_format != 'legacy':
+        import subprocess
+        config.update(
+            source_commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+            comparison_group='BRC_V1_TWOTERM_20260908',
+            resolved_online_fp8_backward='two_term_native_block_scaled_physical_vjp',
+            resolved_online_compute_weight_scaling='independent_main_carry_reduction_blocks',
+            resolved_online_fp8_weight_scaling='state_current_amax_per_tensor_compute_independent_block_scales',
+            resolved_evaluation_rng='separate_env_preserve_learner_and_numpy_rng',
+        )
     env_names = get_environment_list(FLAGS.env_names)
     resume_manifest = None
     resume_checkpoint = None
@@ -448,7 +521,11 @@ def main(_):
                 FLAGS.fp8_resident_canonicalization
             ),
             fp8_resident_carry=FLAGS.fp8_resident_carry,
+            critic_residual_compute_format=FLAGS.critic_residual_compute_format,
             critic_optimizer_state=FLAGS.critic_optimizer_state,
+            fp8_all_dense_kernels=FLAGS.fp8_all_dense_kernels,
+            fp8_input_dense_kernel=FLAGS.fp8_input_dense_kernel,
+            fp8_output_dense_kernel=FLAGS.fp8_output_dense_kernel,
         )
         resource_devices = tuple(jax.devices())
         replay_buffer = ParallelReplayBuffer(
@@ -595,6 +672,9 @@ def main(_):
                         and i % FLAGS.tensor_stats_interval == 0
                     ),
                 )
+                if FLAGS.critic_residual_compute_format != 'legacy':
+                    if not all(np.isfinite(np.asarray(v)).all() for v in jax.tree.leaves(latest_update_info)):
+                        raise FloatingPointError('Native V1 learner produced NaN/Inf')
                 if first_update_sec is None or profiling:
                     _block_tree(latest_update_info)
                 if first_update_sec is None:
@@ -699,9 +779,15 @@ def main(_):
                 if latest_update_info is not None:
                     _block_tree(latest_update_info)
                 eval_start = time.perf_counter()
-                eval_stats = eval_env.evaluate(
-                    agent, num_episodes=FLAGS.eval_episodes, temperature=0.0, render=FLAGS.render
-                )
+                training_rng = agent.rng
+                numpy_rng = np.random.get_state()
+                try:
+                    eval_stats = eval_env.evaluate(
+                        agent, num_episodes=FLAGS.eval_episodes, temperature=0.0, render=FLAGS.render
+                    )
+                finally:
+                    agent.rng = training_rng
+                    np.random.set_state(numpy_rng)
                 eval_sec = time.perf_counter() - eval_start
                 renders = eval_stats.pop('renders', None)
                 eval_metrics = {

@@ -453,7 +453,11 @@ class BRC(object):
         fp8_amax_history_length: int = 1024,
         fp8_resident_canonicalization: bool = False,
         fp8_resident_carry: bool = False,
+        fp8_all_dense_kernels: bool = False,
+        fp8_input_dense_kernel: bool = False,
+        fp8_output_dense_kernel: bool = False,
         critic_optimizer_state: str = 'fp32',
+        critic_residual_compute_format: str = 'legacy',
     ) -> None:
         if critic_optimizer_state not in MOMENT_MODES:
             raise ValueError(f'Unknown critic_optimizer_state: {critic_optimizer_state}')
@@ -483,7 +487,17 @@ class BRC(object):
         self.target_critic_precision = target_critic_precision
         self.fp8_amax_history_length = fp8_amax_history_length
         self.fp8_resident_canonicalization = fp8_resident_canonicalization
+        if critic_residual_compute_format != 'legacy':
+            from jaxrl.low_precision.block_formats import FORMATS
+            if critic_residual_compute_format not in FORMATS:
+                raise ValueError('Unsupported native residual format')
+            if critic_precision != 'fp8_resident' or not fp8_resident_carry:
+                raise ValueError('Native two-term compute requires resident CARRY')
+        self.critic_residual_compute_format = critic_residual_compute_format
         self.fp8_resident_carry = fp8_resident_carry
+        self.fp8_all_dense_kernels = fp8_all_dense_kernels
+        self.fp8_input_dense_kernel = fp8_input_dense_kernel
+        self.fp8_output_dense_kernel = fp8_output_dense_kernel
         self.critic_optimizer_state = critic_optimizer_state
         
         self.num_tasks = num_tasks
@@ -515,6 +529,10 @@ class BRC(object):
                     fp8_resident_canonicalization
                 ),
                 fp8_resident_carry=fp8_resident_carry,
+                critic_residual_compute_format=critic_residual_compute_format,
+                fp8_all_dense_kernels=fp8_all_dense_kernels,
+                fp8_input_dense_kernel=fp8_input_dense_kernel,
+                fp8_output_dense_kernel=fp8_output_dense_kernel,
             )
             critic_reference_def = Critic(
                 num_tasks=num_tasks,
@@ -526,6 +544,9 @@ class BRC(object):
                 multitask=self.multitask,
                 task_embedding_norm=task_embedding_norm,
                 critic_precision='fp32',
+                fp8_all_dense_kernels=fp8_all_dense_kernels,
+                fp8_input_dense_kernel=fp8_input_dense_kernel,
+                fp8_output_dense_kernel=fp8_output_dense_kernel,
             )
             target_critic_def = Critic(
                 num_tasks=num_tasks,
@@ -538,6 +559,9 @@ class BRC(object):
                 task_embedding_norm=task_embedding_norm,
                 critic_precision=target_critic_precision,
                 fp8_amax_history_length=fp8_amax_history_length,
+                fp8_all_dense_kernels=fp8_all_dense_kernels,
+                fp8_input_dense_kernel=fp8_input_dense_kernel,
+                fp8_output_dense_kernel=fp8_output_dense_kernel,
             )
             actor = Model.create(actor_def, inputs=[actor_key, actor_init], tx=optax.adamw(learning_rate=actor_lr))
             critic = Model.create(
@@ -568,6 +592,9 @@ class BRC(object):
             multitask=self.multitask,
             task_embedding_norm=task_embedding_norm,
             critic_precision='fp32',
+            fp8_all_dense_kernels=fp8_all_dense_kernels,
+            fp8_input_dense_kernel=fp8_input_dense_kernel,
+            fp8_output_dense_kernel=fp8_output_dense_kernel,
         )
         self.normalizer_rng = jax.random.PRNGKey(self.seed + 104729)
         self.task_entropies = jnp.full((num_tasks,), self.target_entropy, dtype=jnp.float32)
@@ -769,6 +796,13 @@ class BRC(object):
                 physical_params = traverse_util.flatten_dict(
                     dequantize_critic_params(self.critic), sep='/'
                 )
+                stored_params = traverse_util.flatten_dict(
+                    self.critic.params, sep='/'
+                )
+                resident_paths = {
+                    path for path, value in stored_params.items()
+                    if value.dtype == jnp.float8_e4m3fn
+                }
                 storage['carry_codes'] = _split_ensemble_arrays({
                     path: value
                     for path, value in critic_meta_flat.items()
@@ -777,12 +811,12 @@ class BRC(object):
                 storage['logical_kernels'] = _split_ensemble_arrays({
                     path: value
                     for path, value in logical_params.items()
-                    if '/BronetBlock_' in path and path.endswith('/kernel')
+                    if path in resident_paths
                 })
                 storage['physical_kernels'] = _split_ensemble_arrays({
                     path: value
                     for path, value in physical_params.items()
-                    if '/BronetBlock_' in path and path.endswith('/kernel')
+                    if path in resident_paths
                 })
         if self.target_critic_precision in ('fp8_direct', 'fp8_lag'):
             diagnostics['fp8_target_forward'] = self._fp8_diagnostics(

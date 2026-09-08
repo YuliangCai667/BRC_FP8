@@ -136,6 +136,7 @@ class ResidentFp8Dense(nn.Module):
     bias_init: Callable = nn.initializers.zeros_init()
     fixed_anchor: bool = False
     carry: bool = False
+    critic_residual_compute_format: str = 'legacy'
     fp8_amax_history_length: int = 1024
 
     @nn.compact
@@ -213,6 +214,21 @@ class ResidentFp8Dense(nn.Module):
             kernel_codes = (physical_kernel / kernel_scale).astype(
                 jnp.float8_e4m3fn
             )
+
+        if self.critic_residual_compute_format != 'legacy':
+            from jaxrl.low_precision.two_term_dense import two_term_dense
+            carry_codes = self.get_variable(OVERWRITE_WITH_GRADIENT, 'kernel_carry')
+            if not self.carry or carry_codes is None:
+                raise ValueError('Two-term compute requires persistent CARRY weights')
+            codes = lax.stop_gradient(lax.optimization_barrier(kernel_codes))
+            carry_codes = lax.stop_gradient(carry_codes)
+            scale = lax.stop_gradient(kernel_scale)
+            x = jnp.asarray(inputs, dtype=jnp.float32)
+            out = two_term_dense(x.reshape(-1, x.shape[-1]), physical_kernel,
+                                 codes.astype(jnp.float32), carry_codes.astype(jnp.float32),
+                                 scale, bias, self.critic_residual_compute_format)
+            self.sow('intermediates', 'activation', x)
+            return out.reshape(x.shape[:-1] + (self.features,))
 
         inputs = jnp.asarray(inputs, dtype=jnp.float32)
         activation_amax, activation_scale = _e4m3_amax_and_scale(inputs)
@@ -319,6 +335,48 @@ class CurrentAmaxFp8Dense(nn.Module):
         return outputs
 
 
+def _precision_dense(
+    features: int,
+    name: str,
+    *,
+    fp8_direct: bool = False,
+    fp8_resident: bool = False,
+    fp8_current_master: bool = False,
+    fp8_resident_fixed_anchor: bool = False,
+    fp8_resident_carry: bool = False,
+    critic_residual_compute_format: str = 'legacy',
+    fp8_amax_history_length: int = 1024,
+):
+    if fp8_resident:
+        return ResidentFp8Dense(
+            features,
+            kernel_init=default_init(),
+            fixed_anchor=fp8_resident_fixed_anchor,
+            carry=fp8_resident_carry,
+            critic_residual_compute_format=critic_residual_compute_format,
+            fp8_amax_history_length=fp8_amax_history_length,
+            name=name,
+        )
+    if fp8_current_master:
+        return CurrentAmaxFp8Dense(
+            features,
+            kernel_init=default_init(),
+            fp8_amax_history_length=fp8_amax_history_length,
+            name=name,
+        )
+    if fp8_direct:
+        return nn.Dense(
+            features,
+            kernel_init=default_init(),
+            dot_general_cls=functools.partial(
+                Fp8DirectDotGeneralOp,
+                amax_history_length=fp8_amax_history_length,
+            ),
+            name=name,
+        )
+    return nn.Dense(features, kernel_init=default_init(), name=name)
+
+
 class BronetBlock(nn.Module):
     hidden_dims: int
     activations: Callable[[jnp.ndarray], jnp.ndarray]
@@ -327,34 +385,20 @@ class BronetBlock(nn.Module):
     fp8_current_master: bool = False
     fp8_resident_fixed_anchor: bool = False
     fp8_resident_carry: bool = False
+    critic_residual_compute_format: str = 'legacy'
     fp8_amax_history_length: int = 1024
 
     def _dense(self, name: str):
-        if self.fp8_resident:
-            return ResidentFp8Dense(
-                self.hidden_dims,
-                kernel_init=default_init(),
-                fixed_anchor=self.fp8_resident_fixed_anchor,
-                carry=self.fp8_resident_carry,
-                fp8_amax_history_length=self.fp8_amax_history_length,
-                name=name,
-            )
-        if self.fp8_current_master:
-            return CurrentAmaxFp8Dense(
-                self.hidden_dims,
-                kernel_init=default_init(),
-                fp8_amax_history_length=self.fp8_amax_history_length,
-                name=name,
-            )
-        if not self.fp8_direct:
-            return nn.Dense(self.hidden_dims, kernel_init=default_init())
-        return nn.Dense(
+        return _precision_dense(
             self.hidden_dims,
-            kernel_init=default_init(),
-            dot_general_cls=functools.partial(
-                Fp8DirectDotGeneralOp,
-                amax_history_length=self.fp8_amax_history_length,
-            ),
+            name,
+            fp8_direct=self.fp8_direct,
+            fp8_resident=self.fp8_resident,
+            fp8_current_master=self.fp8_current_master,
+            fp8_resident_fixed_anchor=self.fp8_resident_fixed_anchor,
+            fp8_resident_carry=self.fp8_resident_carry,
+            critic_residual_compute_format=self.critic_residual_compute_format,
+            fp8_amax_history_length=self.fp8_amax_history_length,
         )
 
     @nn.compact
@@ -379,11 +423,34 @@ class BroNet(nn.Module):
     current_master_fp8_residual_blocks: bool = False
     resident_fp8_fixed_anchor: bool = False
     resident_fp8_carry: bool = False
+    critic_residual_compute_format: str = 'legacy'
+    fp8_all_dense_kernels: bool = False
+    fp8_input_dense_kernel: bool = False
+    fp8_output_dense_kernel: bool = False
     fp8_amax_history_length: int = 1024
+
+    def _edge_dense(self, name: str, features: int):
+        enabled = self.fp8_all_dense_kernels or (
+            self.fp8_input_dense_kernel
+            if name == 'Dense_0'
+            else self.fp8_output_dense_kernel
+        )
+        return _precision_dense(
+            features,
+            name,
+            fp8_direct=enabled and self.fp8_residual_blocks,
+            fp8_resident=enabled and self.resident_fp8_residual_blocks,
+            fp8_current_master=(
+                enabled and self.current_master_fp8_residual_blocks
+            ),
+            fp8_resident_fixed_anchor=self.resident_fp8_fixed_anchor,
+            fp8_resident_carry=self.resident_fp8_carry,
+            fp8_amax_history_length=self.fp8_amax_history_length,
+        )
 
     @nn.compact
     def __call__(self, x: jnp.ndarray):
-        x = nn.Dense(self.hidden_dims, kernel_init=default_init())(x)
+        x = self._edge_dense('Dense_0', self.hidden_dims)(x)
         self.sow('intermediates', 'input_dense_output', x)
         x = nn.LayerNorm()(x)
         x = self.activations(x)
@@ -396,10 +463,11 @@ class BroNet(nn.Module):
                 fp8_current_master=self.current_master_fp8_residual_blocks,
                 fp8_resident_fixed_anchor=self.resident_fp8_fixed_anchor,
                 fp8_resident_carry=self.resident_fp8_carry,
+                critic_residual_compute_format=self.critic_residual_compute_format,
                 fp8_amax_history_length=self.fp8_amax_history_length,
             )(x)
         if self.add_final_layer:
-            x = nn.Dense(self.output_nodes, kernel_init=default_init())(x)
+            x = self._edge_dense('Dense_1', self.output_nodes)(x)
             self.sow('intermediates', 'final_dense_output', x)
         return x
 
@@ -427,6 +495,10 @@ class QValue(nn.Module):
     fp8_amax_history_length: int = 1024
     fp8_resident_fixed_anchor: bool = False
     fp8_resident_carry: bool = False
+    critic_residual_compute_format: str = 'legacy'
+    fp8_all_dense_kernels: bool = False
+    fp8_input_dense_kernel: bool = False
+    fp8_output_dense_kernel: bool = False
     
     def setup(self):
         self.critic = BroNet(
@@ -444,6 +516,10 @@ class QValue(nn.Module):
             ),
             resident_fp8_fixed_anchor=self.fp8_resident_fixed_anchor,
             resident_fp8_carry=self.fp8_resident_carry,
+            critic_residual_compute_format=self.critic_residual_compute_format,
+            fp8_all_dense_kernels=self.fp8_all_dense_kernels,
+            fp8_input_dense_kernel=self.fp8_input_dense_kernel,
+            fp8_output_dense_kernel=self.fp8_output_dense_kernel,
             fp8_amax_history_length=self.fp8_amax_history_length,
         )
 
@@ -461,6 +537,10 @@ class QValueEnsemble(nn.Module):
     fp8_amax_history_length: int = 1024
     fp8_resident_fixed_anchor: bool = False
     fp8_resident_carry: bool = False
+    critic_residual_compute_format: str = 'legacy'
+    fp8_all_dense_kernels: bool = False
+    fp8_input_dense_kernel: bool = False
+    fp8_output_dense_kernel: bool = False
     
     def setup(self):
         variable_axes = {'params': 0, 'intermediates': 0}
@@ -483,6 +563,10 @@ class QValueEnsemble(nn.Module):
             fp8_amax_history_length=self.fp8_amax_history_length,
             fp8_resident_fixed_anchor=self.fp8_resident_fixed_anchor,
             fp8_resident_carry=self.fp8_resident_carry,
+            critic_residual_compute_format=self.critic_residual_compute_format,
+            fp8_all_dense_kernels=self.fp8_all_dense_kernels,
+            fp8_input_dense_kernel=self.fp8_input_dense_kernel,
+            fp8_output_dense_kernel=self.fp8_output_dense_kernel,
         )
 
     def __call__(self, inputs: jnp.ndarray):
@@ -503,6 +587,10 @@ class Critic(nn.Module):
     fp8_amax_history_length: int = 1024
     fp8_resident_canonicalization: bool = False
     fp8_resident_carry: bool = False
+    critic_residual_compute_format: str = 'legacy'
+    fp8_all_dense_kernels: bool = False
+    fp8_input_dense_kernel: bool = False
+    fp8_output_dense_kernel: bool = False
     
     def setup(self):
         if self.multitask:
@@ -519,6 +607,10 @@ class Critic(nn.Module):
             fp8_amax_history_length=self.fp8_amax_history_length,
             fp8_resident_fixed_anchor=self.fp8_resident_canonicalization,
             fp8_resident_carry=self.fp8_resident_carry,
+            critic_residual_compute_format=self.critic_residual_compute_format,
+            fp8_all_dense_kernels=self.fp8_all_dense_kernels,
+            fp8_input_dense_kernel=self.fp8_input_dense_kernel,
+            fp8_output_dense_kernel=self.fp8_output_dense_kernel,
         )
 
     def __call__(self, observations: jnp.ndarray, actions: jnp.ndarray, task_ids: jnp.ndarray, return_embeddings: bool = False):

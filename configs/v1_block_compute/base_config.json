@@ -1,0 +1,14 @@
+{
+  "comparison_group": "BRC_V1_TWOTERM_20260908",
+  "seed": 42, "max_steps": 500000, "start_training": 5000,
+  "updates_per_step": 2, "batch_size": 1024, "width_critic": 4096,
+  "env_names": "DMC_DOGS", "replay_buffer_size": 1000000,
+  "eval_seed_offset": 0, "eval_episodes": 10, "eval_interval": 5000,
+  "tensor_stats_interval": 25000, "analysis_checkpoint_interval": 50000,
+  "recovery_checkpoint_interval": 100000, "paper_alignment": true,
+  "return_bootstrap": "reward_mean", "offline_evaluation": true, "render": false,
+  "critic_precision": "fp8_resident", "fp8_resident_carry": true,
+  "critic_optimizer_state": "fp8_carry", "target_critic_precision": "fp8_lag",
+  "critic_residual_compute_terms": "main_plus_carry",
+  "critic_residual_compute_rounding": "rtn", "critic_residual_compute_rht": false
+}

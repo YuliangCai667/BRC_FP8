@@ -1337,3 +1337,16 @@ anchor canonicalization 的结果；其目录、W&B 和停止记录全部保留�
 - 启动实验时新增一行，记录开始时间、run ID、分支、commit 和完整命令。
 - 结束后补充最终 eval、最好 eval，以及末 3 次 eval 均值；异常退出则记录停止 step 和原因。
 - 对比前先检查 reset 模式、训练/eval seed 协议和代码 commit，协议不同的结果不直接合并统计。
+
+## EXP-V1-BLOCK-20260908 — 三格式双项 online residual
+
+用户要求按附件实现并启动 GPU0 MXFP8、GPU1 NVFP4、GPU2 MXFP4，三个均从头
+seed42/500k；三组启动验收后停止监控。实现和 smoke 见
+[变更记录](2026-09-08-v1-block-compute.md)。原始证据与实时启动身份保存在
+`/home/caiyuliang/brc_v1_audit`，正式输出在 `/home/caiyuliang/brc_v1_runs`。
+
+- MXFP8：GPU0，16 update / eval / restore smoke 通过，待冻结后立即启动。
+- NVFP4：GPU1，待从 V1 准确提交扩展原生后端并通过本卡 smoke。
+- MXFP4：GPU2，同一 FP4 提交，待原生后端和本卡 smoke。
+- GPU1/2 已有其他进程；按本轮计划只等待对应 GPU，不停止其他任务，不更换 GPU。
+- 所有 early return 均不作为重配或停止依据；仅工程/数值错误停止。

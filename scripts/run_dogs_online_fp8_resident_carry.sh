@@ -16,11 +16,26 @@ max_steps=${3:-500000}
 resume_from=${4:-}
 log_to_wandb=${BRC_LOG_TO_WANDB:-true}
 target_critic_precision=${BRC_TARGET_CRITIC_PRECISION:-fp8_direct}
+all_dense_kernels=${BRC_FP8_ALL_DENSE_KERNELS:-false}
+input_dense_kernel=${BRC_FP8_INPUT_DENSE_KERNEL:-false}
+output_dense_kernel=${BRC_FP8_OUTPUT_DENSE_KERNEL:-false}
 optimizer_state=${BRC_CRITIC_OPTIMIZER_STATE:-fp32}
 run_tag=${BRC_RUN_TAG:-}
 tag_segment=
 if [[ "$target_critic_precision" != "fp8_direct" && "$target_critic_precision" != "fp8_lag" ]]; then
   echo "BRC_TARGET_CRITIC_PRECISION must be fp8_direct or fp8_lag" >&2
+  exit 2
+fi
+if [[ "$all_dense_kernels" != "true" && "$all_dense_kernels" != "false" ]]; then
+  echo "BRC_FP8_ALL_DENSE_KERNELS must be true or false" >&2
+  exit 2
+fi
+if [[ "$input_dense_kernel" != "true" && "$input_dense_kernel" != "false" ]]; then
+  echo "BRC_FP8_INPUT_DENSE_KERNEL must be true or false" >&2
+  exit 2
+fi
+if [[ "$output_dense_kernel" != "true" && "$output_dense_kernel" != "false" ]]; then
+  echo "BRC_FP8_OUTPUT_DENSE_KERNEL must be true or false" >&2
   exit 2
 fi
 if [[ -n "$run_tag" ]]; then
@@ -64,6 +79,9 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false \
   --fp8_resident_carry=true \
   --critic_optimizer_state="$optimizer_state" \
   --fp8_resident_canonicalization=false \
+  --fp8_all_dense_kernels="$all_dense_kernels" \
+  --fp8_input_dense_kernel="$input_dense_kernel" \
+  --fp8_output_dense_kernel="$output_dense_kernel" \
   --target_critic_precision="$target_critic_precision" \
   --fp8_amax_history_length=1024 \
   --paper_alignment=true \

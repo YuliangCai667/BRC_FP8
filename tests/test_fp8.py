@@ -44,6 +44,9 @@ def make_agent(
     target_precision='fp32',
     resident_canonicalization=False,
     resident_carry=False,
+    all_dense_kernels=False,
+    input_dense_kernel=False,
+    output_dense_kernel=False,
 ):
     return BRC(
         0,
@@ -58,6 +61,9 @@ def make_agent(
         fp8_amax_history_length=8,
         fp8_resident_canonicalization=resident_canonicalization,
         fp8_resident_carry=resident_carry,
+        fp8_all_dense_kernels=all_dense_kernels,
+        fp8_input_dense_kernel=input_dense_kernel,
+        fp8_output_dense_kernel=output_dense_kernel,
     )
 
 
@@ -97,6 +103,144 @@ def assert_trees_allclose(test, left, right, *, rtol, atol):
 
 
 class Fp8CriticTest(unittest.TestCase):
+    def test_input_and_output_dense_scopes_are_independent(self):
+        for selected, expected_edge in (
+            ('input', '/critic/Dense_0/kernel'),
+            ('output', '/critic/Dense_1/kernel'),
+        ):
+            with self.subTest(selected=selected):
+                agent = make_agent(
+                    'fp8_resident',
+                    'fp8_lag',
+                    resident_carry=True,
+                    input_dense_kernel=selected == 'input',
+                    output_dense_kernel=selected == 'output',
+                )
+                online = traverse_util.flatten_dict(
+                    agent.critic.params, sep='/'
+                )
+                target = traverse_util.flatten_dict(
+                    agent.target_critic.params, sep='/'
+                )
+                online_meta = traverse_util.flatten_dict(
+                    agent.critic.fp8_meta, sep='/'
+                )
+                target_meta = traverse_util.flatten_dict(
+                    agent.target_critic.fp8_meta, sep='/'
+                )
+                online_fp8 = {
+                    path for path, value in online.items()
+                    if value.dtype == jnp.float8_e4m3fn
+                }
+                target_fp8 = {
+                    path for path, value in target.items()
+                    if value.dtype == jnp.float8_e4m3fn
+                }
+
+                self.assertEqual(len(online_fp8), 5)
+                self.assertEqual(online_fp8, target_fp8)
+                edge_paths = {
+                    path for path in online_fp8
+                    if '/BronetBlock_' not in path
+                }
+                self.assertEqual(len(edge_paths), 1)
+                self.assertTrue(next(iter(edge_paths)).endswith(expected_edge))
+                self.assertEqual(
+                    sum(
+                        path.endswith('/kernel_carry')
+                        for path in online_meta
+                    ),
+                    5,
+                )
+                self.assertEqual(
+                    sum(path.endswith('/lag_scale') for path in target_meta),
+                    5,
+                )
+
+                info = agent.update(
+                    make_batch(), 1, env_step=1,
+                    collect_update_diagnostics=True,
+                )
+                jax.block_until_ready(info)
+                self.assertEqual(
+                    len(
+                        agent.last_online_resident_diagnostics[
+                            'parameter_write'
+                        ]
+                    ),
+                    10,
+                )
+                self.assertEqual(len(agent.last_target_ema_diagnostics), 10)
+                self.assertTrue(all(
+                    np.isfinite(np.asarray(leaf)).all()
+                    for leaf in jax.tree_util.tree_leaves(info)
+                ))
+
+    def test_all_dense_carry_and_lag_scope(self):
+        agent = make_agent(
+            'fp8_resident',
+            'fp8_lag',
+            resident_carry=True,
+            all_dense_kernels=True,
+        )
+        online = traverse_util.flatten_dict(agent.critic.params, sep='/')
+        target = traverse_util.flatten_dict(
+            agent.target_critic.params, sep='/'
+        )
+        online_meta = traverse_util.flatten_dict(
+            agent.critic.fp8_meta, sep='/'
+        )
+        target_meta = traverse_util.flatten_dict(
+            agent.target_critic.fp8_meta, sep='/'
+        )
+        online_fp8 = {
+            path for path, value in online.items()
+            if value.dtype == jnp.float8_e4m3fn
+        }
+        target_fp8 = {
+            path for path, value in target.items()
+            if value.dtype == jnp.float8_e4m3fn
+        }
+        self.assertEqual(len(online_fp8), 6)
+        self.assertEqual(online_fp8, target_fp8)
+        self.assertTrue(all(path.endswith('/kernel') for path in online_fp8))
+        self.assertEqual(
+            sum('/BronetBlock_' not in path for path in online_fp8), 2
+        )
+        self.assertEqual(
+            sum(path.endswith('/kernel_carry') for path in online_meta), 6
+        )
+        self.assertEqual(
+            sum(path.endswith('/lag_scale') for path in target_meta), 6
+        )
+        self.assertTrue(all(
+            value.dtype == np.dtype(np.float32)
+            for path, value in online.items()
+            if path not in online_fp8
+        ))
+        assert_trees_allclose(
+            self,
+            reconstruct_target_params(agent.critic, agent.target_critic),
+            reconstruct_carry_logical_critic_params(agent.critic),
+            rtol=2e-7,
+            atol=1e-7,
+        )
+
+        info = agent.update(
+            make_batch(), 1, env_step=1,
+            collect_update_diagnostics=True,
+        )
+        jax.block_until_ready(info)
+        self.assertEqual(
+            len(agent.last_online_resident_diagnostics['parameter_write']),
+            12,
+        )
+        self.assertEqual(len(agent.last_target_ema_diagnostics), 12)
+        self.assertTrue(all(
+            np.isfinite(np.asarray(leaf)).all()
+            for leaf in jax.tree_util.tree_leaves(info)
+        ))
+
     def test_probability_js_is_finite_when_midpoint_underflows(self):
         smallest = jnp.nextafter(jnp.float32(0), jnp.float32(1))
         left = jnp.asarray([[smallest, 1.0]], dtype=jnp.float32)
