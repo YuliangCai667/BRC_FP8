@@ -1,0 +1,1 @@
+{"critic_residual_compute_format":"mxfp4","gpu_index":2,"rounding":"rtn","rht":false,"block_size":32,"operand_dtype":"e2m1_packed","block_scale_dtype":"e8m0"}

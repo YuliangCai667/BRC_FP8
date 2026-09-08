@@ -9,7 +9,19 @@
 #include "cutlass/util/packed_stride.hpp"
 namespace ffi=xla::ffi;
 using namespace cute;
+#ifndef BRC_FORMAT
+#define BRC_FORMAT 0
+#endif
+#if BRC_FORMAT == 0
 using Element=cutlass::mx_float8_t<cutlass::float_e4m3_t>;
+constexpr int Alignment=16;
+#elif BRC_FORMAT == 1
+using Element=cutlass::nv_float4_t<cutlass::float_e2m1_t>;
+constexpr int Alignment=32;
+#elif BRC_FORMAT == 2
+using Element=cutlass::mx_float4_t<cutlass::float_e2m1_t>;
+constexpr int Alignment=32;
+#endif
 using Arch=cutlass::arch::Sm120;
 using Op=cutlass::arch::OpClassBlockScaledTensorOp;
 using BlockTile=Shape<_128,_128,_128>;
@@ -19,7 +31,7 @@ using Epilogue=typename cutlass::epilogue::collective::CollectiveBuilder<Arch,Op
  float,cutlass::layout::RowMajor,4,float,cutlass::layout::RowMajor,4,
  cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
 using Mainloop=typename cutlass::gemm::collective::CollectiveBuilder<Arch,Op,
- Element,cutlass::layout::RowMajor,16,Element,cutlass::layout::ColumnMajor,16,float,BlockTile,Cluster,
+ Element,cutlass::layout::RowMajor,Alignment,Element,cutlass::layout::ColumnMajor,Alignment,float,BlockTile,Cluster,
  cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(sizeof(typename Epilogue::SharedStorage))>,
  cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
 using Kernel=cutlass::gemm::kernel::GemmUniversal<Shape<int,int,int,int>,Mainloop,Epilogue,void>;
@@ -47,7 +59,7 @@ ffi::Error Matmul(cudaStream_t stream, ffi::Buffer<ffi::U8> x,ffi::Buffer<ffi::U
  CHECK(gemm.run(stream));
  return ffi::Error::Success();
 }
-XLA_FFI_DEFINE_HANDLER_SYMBOL(brc_mxfp8,Matmul,ffi::Ffi::Bind()
+XLA_FFI_DEFINE_HANDLER_SYMBOL(brc_block,Matmul,ffi::Ffi::Bind()
  .Ctx<ffi::PlatformStream<cudaStream_t>>()
  .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()
  .Arg<ffi::Buffer<ffi::U8>>().Arg<ffi::Buffer<ffi::U8>>()

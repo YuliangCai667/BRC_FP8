@@ -39,7 +39,7 @@ flags.DEFINE_integer('start_training', 5000, 'Number of steps before training st
 flags.DEFINE_string('env_names', 'cheetah-run', 'Environment name or named task group.')
 flags.DEFINE_boolean('log_to_wandb', True, 'Whether to mirror metrics to W&B.')
 flags.DEFINE_string('wandb_name', 'auto', 'W&B display name; auto uses the seed.')
-flags.DEFINE_enum('critic_residual_compute_format', 'legacy', ['legacy', 'mxfp8'], 'Online residual native compute format.')
+flags.DEFINE_enum('critic_residual_compute_format', 'legacy', ['legacy', 'mxfp8', 'nvfp4', 'mxfp4'], 'Online residual native compute format.')
 flags.DEFINE_enum('critic_residual_compute_terms', 'main_plus_carry', ['main_plus_carry'], 'V1 two-term operator.')
 flags.DEFINE_enum('critic_residual_compute_rounding', 'rtn', ['rtn'], 'Deterministic compute operand rounding.')
 flags.DEFINE_boolean('critic_residual_compute_rht', False, 'Must be false for V1.')
@@ -265,7 +265,7 @@ def main(_):
                       online_residual_nvfp4_weight_scaling='1d',
                       weight_state_codec='carry_e4m3_gain16',
                       optimizer_state_codec='dual_fp8_m_v_block128_gain16', target_state_codec='lag',
-                      kernel_build_hash=register()[1],
+                      kernel_build_hash=register(FLAGS.critic_residual_compute_format)[1],
                       dependency_manifest=dependencies,
                       dependency_manifest_hash=hashlib.sha256(json.dumps(dependencies,sort_keys=True).encode()).hexdigest())
     config.update({

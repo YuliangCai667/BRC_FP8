@@ -1,0 +1,1 @@
+{"critic_residual_compute_format":"nvfp4","gpu_index":1,"rounding":"rtn","rht":false,"weight_scaling":"1d","block_size":16,"operand_dtype":"e2m1_packed","block_scale_dtype":"e4m3","tensor_scale_dtype":"float32"}

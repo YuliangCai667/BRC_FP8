@@ -3,6 +3,8 @@
 set -euo pipefail
 audit=/home/caiyuliang/brc_v1_audit
 socket=$audit/tmux.sock
+shared_arg=
+if [[ ${BRC_ALLOW_SHARED_GPU:-false} == true ]]; then shared_arg=--allow-shared; fi
 formats=(${BRC_LAUNCH_FORMATS:-mxfp8 nvfp4 mxfp4})
 for format in "${formats[@]}"; do
   case "$format" in
@@ -16,5 +18,5 @@ for format in "${formats[@]}"; do
   test -f "$smoke"
   session=brc_v1_${format}_gpu${gpu}
   tmux -S "$socket" new-session -d -s "$session" -c "$root" \
-    "/home/caiyuliang/anaconda3/envs/brc/bin/python scripts/start_v1_when_idle.py --gpu=$gpu --format=$format --run-id=$run_id --smoke-report=$smoke --status=$audit/${format}_launch.json > $audit/${format}_formal.log 2>&1"
+    "/home/caiyuliang/anaconda3/envs/brc/bin/python scripts/start_v1_when_idle.py --gpu=$gpu --format=$format --run-id=$run_id --smoke-report=$smoke --status=$audit/${format}_launch.json $shared_arg > $audit/${format}_formal.log 2>&1"
 done

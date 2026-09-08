@@ -1350,3 +1350,15 @@ seed42/500k；三组启动验收后停止监控。实现和 smoke 见
 - MXFP4：GPU2，同一 FP4 提交，待原生后端和本卡 smoke。
 - GPU1/2 已有其他进程；按本轮计划只等待对应 GPU，不停止其他任务，不更换 GPU。
 - 所有 early return 均不作为重配或停止依据；仅工程/数值错误停止。
+
+
+### EXP-V1-BLOCK-20260908：共享 GPU 获准，FP4 验证完成（2026-09-09）
+
+- 用户明确允许共享GPU，两个格式均在指定GPU完成native/16-update/eval/restore验证。
+- V1 `1dd21cb8` 已推送，GPU0正式PID2263537已通过env5000/2updates启动验收。
+- FP4变更见 [格式迁移记录](2026-09-08-v1-fp4-compute.md)；完成本提交后立即推送，
+  以相同SHA建立NVFP4/GPU1与MXFP4/GPU2两个detached run worktree。
+- 既有GPU占用不终止；共享资源影响时间指标。失败的NVFP4初版scale/JIT探针和
+  MXFP4首次诊断OOM保留在仓库外，修正后通过，没有更换训练recipe。
+- 正式run身份、PID、UUID、输出、计数及最终启动验收写入
+  `/home/caiyuliang/brc_v1_audit/launch_report.md`，避免修改冻结的运行源树。

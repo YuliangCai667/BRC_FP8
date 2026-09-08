@@ -31,7 +31,7 @@ def check_finite(tree):
 def main():
     p=argparse.ArgumentParser();p.add_argument('--format',default='mxfp8');p.add_argument('--output',type=Path,required=True);a=p.parse_args()
     a.output.mkdir(parents=True,exist_ok=False)
-    report={'format':a.format,'status':'STARTED','backend':'CUTLASS SM120 native block-scaled','kernel_build_hash':register()[1]}
+    report={'format':a.format,'status':'STARTED','backend':'CUTLASS SM120 native block-scaled','kernel_build_hash':register(a.format)[1]}
     def save(): (a.output/'report.json').write_text(json.dumps(report,indent=2))
     save()
     env=ParallelEnv(get_environment_list('DMC_DOGS'),seed=42)
@@ -67,8 +67,14 @@ def main():
     assert agent.target_critic.apply_fn.critic_residual_compute_format=='legacy'
     assert not agent.critic.apply_fn.fp8_all_dense_kernels
     # Critic small-batch Fprop and dQ/da use native residuals too.
-    qfun=jax.jit(lambda ac:agent.critic(obs[:1],ac,jnp.zeros(1,jnp.int32)).sum())
-    dq=jax.jit(jax.grad(qfun))(jnp.zeros_like(jnp.asarray(act[:1])));check_finite(dq)
+    # Pass weights as runtime buffers; a closure would embed hundreds of MiB
+    # of constants and duplicate resident weights during this diagnostic.
+    def qfun(critic,observations,ac):
+        logits=critic(observations,ac,jnp.zeros(1,jnp.int32))
+        bins=jnp.linspace(-agent.v_max,agent.v_max,agent.num_bins)
+        return (jax.nn.softmax(logits,axis=-1)*bins).sum(-1).mean()
+    dq=jax.jit(jax.grad(qfun,argnums=2))(agent.critic,jnp.asarray(obs[:1]),jnp.zeros_like(jnp.asarray(act[:1])))
+    check_finite(dq)
     report['dq_da_norm']=float(jnp.linalg.norm(dq))
     saved_rng=agent.rng
     ev=env.evaluate(agent,1,temperature=0.0,render=False);agent.rng=saved_rng

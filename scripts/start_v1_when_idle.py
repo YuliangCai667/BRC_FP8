@@ -12,10 +12,11 @@ p=argparse.ArgumentParser()
 p.add_argument('--gpu',type=int,required=True);p.add_argument('--format',required=True)
 p.add_argument('--run-id',required=True);p.add_argument('--smoke-report',type=Path,required=True)
 p.add_argument('--status',type=Path,required=True)
+p.add_argument('--allow-shared',action='store_true')
 a=p.parse_args()
 root=Path(__file__).resolve().parents[1]
 uuid=subprocess.check_output(['nvidia-smi','-i',str(a.gpu),'--query-gpu=uuid','--format=csv,noheader'],text=True).strip()
-state={'format':a.format,'gpu':a.gpu,'gpu_uuid':uuid,'run_id':a.run_id,'worktree':str(root),'commit':subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),'launcher_pid':os.getpid()}
+state={'format':a.format,'gpu':a.gpu,'gpu_uuid':uuid,'run_id':a.run_id,'worktree':str(root),'commit':subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),'launcher_pid':os.getpid(),'shared_gpu_authorized':a.allow_shared}
 a.status.parent.mkdir(parents=True,exist_ok=True)
 # Exclusive per-run status file is the duplicate launch guard.
 with a.status.open('x') as f: json.dump(state,f,indent=2)
@@ -25,7 +26,7 @@ def report(status):
 report('WAITING_GPU')
 while True:
     apps=subprocess.check_output(['nvidia-smi','--query-compute-apps=gpu_uuid,pid','--format=csv,noheader'],text=True)
-    if not any(line.split(',')[0].strip()==uuid for line in apps.splitlines()): break
+    if a.allow_shared or not any(line.split(',')[0].strip()==uuid for line in apps.splitlines()): break
     time.sleep(30)
 smoke=json.loads(a.smoke_report.read_text())
 if smoke['status']!='PASSED' or smoke['format']!=a.format:
