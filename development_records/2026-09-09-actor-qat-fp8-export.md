@@ -82,3 +82,13 @@ bash scripts/run_actor_qat_fp8_export.sh
 `<run_dir>/actor_export_status.json`（完成训练后开始创建）。完整 500k 学习曲线、
 450k/500k 与最后三次评估、最终部署包和每任务 10 episodes 配对评估属于
 尚需正式运行产生的结果，不能用 smoke 代替。
+
+正式启动核验：2026-09-09 16:44:53（Asia/Shanghai）启动，PID 26127，
+tmux session `brc_actor_qat_fp8_gpu1_20260909_164453`，socket
+`/home/caiyuliang/brc_v1_audit/tmux.sock`。运行目录为
+`/home/caiyuliang/brc_v1_runs/DMC_DOGS/actor_qat_fp8_export_s42_gpu1_20260909_164453`。
+执行源码提交为 `bc2e80dabfe0fe2b0f27e0540cce1b36b7015ff9`，启动快照已核对。
+[W&B 正式 run](https://wandb.ai/cai200661-sun-yat/FP8%20RL/runs/actor-qat-fp8-s42-gpu1-20260909_164453)
+已在线同步。核验时 env_step=5000、update_step=3，actor loss=26.9681、
+critic loss=23.2745，均为有限值；处于 carry_main。500k 正式训练、
+最终导出及其部署评估仍在等待运行完成。此追加仅记录启动事实，不改变训练源码。
