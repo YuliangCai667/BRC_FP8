@@ -39,8 +39,8 @@ flags.DEFINE_integer('start_training', 5000, 'Number of steps before training st
 flags.DEFINE_string('env_names', 'cheetah-run', 'Environment name or named task group.')
 flags.DEFINE_boolean('log_to_wandb', True, 'Whether to mirror metrics to W&B.')
 flags.DEFINE_string('wandb_name', 'auto', 'W&B display name; auto uses the seed.')
-flags.DEFINE_enum('critic_residual_compute_format', 'legacy', ['legacy', 'mxfp8'], 'Online residual native compute format.')
-flags.DEFINE_enum('critic_residual_compute_terms', 'main_plus_carry', ['main_plus_carry'], 'V1 two-term operator.')
+flags.DEFINE_enum('critic_residual_compute_format', 'legacy', ['legacy', 'hybrid', 'mxfp8'], 'Online residual compute: legacy main-only or CARRY two-term.')
+flags.DEFINE_enum('critic_residual_compute_terms', 'main_plus_carry', ['main_only', 'main_plus_carry'], 'Residual compute terms; legacy always reads main only.')
 flags.DEFINE_enum('critic_residual_compute_rounding', 'rtn', ['rtn'], 'Deterministic compute operand rounding.')
 flags.DEFINE_boolean('critic_residual_compute_rht', False, 'Must be false for V1.')
 flags.DEFINE_boolean('offline_evaluation', True, 'Whether to perform deterministic evaluations.')
@@ -132,7 +132,7 @@ flags.DEFINE_integer('keep_last_recovery_checkpoints', 1, 'Recent recovery check
 flags.DEFINE_boolean('save_replay_buffer', True, 'Include valid replay data in recovery checkpoints.')
 flags.DEFINE_string('resume_from', '', 'Recovery checkpoint or run directory to resume.')
 flags.DEFINE_enum('actor_training_recipe', 'fp32', ['fp32', 'carry_body_bf16_edge_qat'], 'Actor storage and update recipe.')
-flags.DEFINE_enum('actor_body_compute', 'mxfp8_main_plus_carry', ['mxfp8_main_plus_carry'], 'Main phase actor residual compute.')
+flags.DEFINE_enum('actor_body_compute', 'mxfp8_main_plus_carry', ['mxfp8_main_plus_carry', 'hybrid_main_plus_carry'], 'Main phase actor residual compute.')
 flags.DEFINE_enum('actor_edge_storage', 'bf16', ['bf16'], 'QAT edge persistent dtype.')
 flags.DEFINE_boolean('actor_weight_qat', True, 'Enable edge weight QAT in the actor recipe.')
 flags.DEFINE_enum('actor_export_codec', 'e4m3fn_block32_fp32scale_rtn_v1', ['e4m3fn_block32_fp32scale_rtn_v1'], 'Shared QAT / export codec.')
@@ -259,6 +259,8 @@ def main(_):
     )
     if FLAGS.critic_residual_compute_rht:
         raise ValueError('V1 fixes RHT off')
+    if FLAGS.critic_residual_compute_format != 'legacy' and FLAGS.critic_residual_compute_terms != 'main_plus_carry':
+        raise ValueError('hybrid/MXFP8 residual compute requires main_plus_carry')
     config = FLAGS.flag_values_dict()
     actor_qat = FLAGS.actor_training_recipe != 'fp32'
     if actor_qat:
@@ -272,12 +274,12 @@ def main(_):
         raise ValueError('final export requires the aligned actor recipe')
     if actor_qat:
         import subprocess
-        config.update(actor_base_commit='1dd21cb8b420f32c3c3bc33d8a0cd8f11a86ce6d',
+        config.update(actor_base_commit='affa7ea',
                       actor_source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                       resolved_actor_width=256, resolved_actor_depth=1,
                       resolved_actor_optimizer='adamw_fp32_moments',
                       resolved_actor_adamw=dict(learning_rate=3e-4, b1=0.9, b2=0.999, eps=1e-8, weight_decay=1e-4))
-    if FLAGS.critic_residual_compute_format != 'legacy':
+    if FLAGS.critic_residual_compute_format == 'mxfp8':
         from jaxrl.low_precision.backends.native import register
         import importlib.metadata
         dependencies = {name: importlib.metadata.version(name) for name in ('jax','jaxlib','flax','optax')}
@@ -443,7 +445,7 @@ def main(_):
             else 'none'
         ),
     })
-    if FLAGS.critic_residual_compute_format != 'legacy':
+    if FLAGS.critic_residual_compute_format == 'mxfp8':
         import subprocess
         from jaxrl.low_precision import block_formats
         config.update(
@@ -453,6 +455,18 @@ def main(_):
             resolved_online_compute_weight_scaling='independent_main_carry_reduction_blocks',
             resolved_online_compute_scale_policy=block_formats.MXFP8_SCALE_POLICY,
             resolved_online_fp8_weight_scaling='state_current_amax_per_tensor_compute_independent_block_scales',
+            resolved_evaluation_rng='separate_env_preserve_learner_and_numpy_rng',
+        )
+    elif FLAGS.critic_residual_compute_format == 'hybrid':
+        config.update(
+            method_version=2, comparison_group='BRC_HYBRID_CARRY',
+            online_residual_compute_format='hybrid', online_residual_compute_terms='main_plus_carry',
+            weight_state_codec='carry_e4m3_gain16',
+            optimizer_state_codec=FLAGS.critic_optimizer_state, target_state_codec='lag',
+            resolved_online_fp8_backward='two_term_e5m2_delayed_amax_physical_vjp',
+            resolved_online_compute_weight_scaling='shared_state_scale_main_carry',
+            resolved_online_compute_scale_policy='activation_current_tensor_gradient_delayed_tensor',
+            resolved_online_fp8_weight_scaling='state_current_amax_per_tensor',
             resolved_evaluation_rng='separate_env_preserve_learner_and_numpy_rng',
         )
     env_names = get_environment_list(FLAGS.env_names)
@@ -558,6 +572,7 @@ def main(_):
             fp8_input_dense_kernel=FLAGS.fp8_input_dense_kernel,
             fp8_output_dense_kernel=FLAGS.fp8_output_dense_kernel,
             actor_training_recipe=FLAGS.actor_training_recipe,
+            actor_body_compute=FLAGS.actor_body_compute,
             actor_export_align_start=FLAGS.actor_export_align_start,
         )
         resource_devices = tuple(jax.devices())

@@ -448,12 +448,13 @@ def update_actor(key: PRNGKey, actor: Model, critic: Model, temp: Model, batch: 
         }
     if actor_qat.enabled(actor):
         params = actor_qat.logical_params(actor)
-        def logical_loss(params, critic_meta):
-            return actor_loss_fn(actor_qat.logical_variables(actor, params), critic_meta)
-        (grads, new_fp8_meta), info = jax.grad(logical_loss, argnums=(0, 1), has_aux=True)(params, critic.fp8_meta)
-        new_actor, info = actor_qat.apply_gradients(actor, params, grads, info)
+        def logical_loss(params, critic_meta, actor_meta):
+            return actor_loss_fn(actor_qat.logical_variables(actor, params, actor_meta), critic_meta)
+        (grads, new_fp8_meta, actor_meta), info = jax.grad(
+            logical_loss, argnums=(0, 1, 2), has_aux=True)(params, critic.fp8_meta, actor.fp8_meta)
+        new_actor, info = actor_qat.apply_gradients(actor, params, grads, info, actor_meta)
         if _critic_precision(critic) == 'fp8_resident':
-            if getattr(critic.apply_fn, 'critic_residual_compute_format', 'legacy') == 'legacy':
+            if getattr(critic.apply_fn, 'critic_residual_compute_format', 'legacy') in ('legacy', 'hybrid'):
                 new_fp8_meta = _merge_resident_backward_metadata(critic.fp8_meta, new_fp8_meta)
             else:
                 new_fp8_meta = critic.fp8_meta
@@ -468,7 +469,7 @@ def update_actor(key: PRNGKey, actor: Model, critic: Model, temp: Model, batch: 
         )
         new_actor, info = actor.apply_variable_gradients(actor_grads, info)
         if _critic_precision(critic) == 'fp8_resident':
-            if getattr(critic.apply_fn, 'critic_residual_compute_format', 'legacy') == 'legacy':
+            if getattr(critic.apply_fn, 'critic_residual_compute_format', 'legacy') in ('legacy', 'hybrid'):
                 new_fp8_meta = _merge_resident_backward_metadata(critic.fp8_meta, new_fp8_meta)
             else:
                 new_fp8_meta = critic.fp8_meta
@@ -1092,7 +1093,7 @@ def update_critic(key: PRNGKey, actor: Model, critic: Model, target_critic: Mode
         (param_grads, backward_fp8_meta), info = jax.grad(
             physical_loss_fn, argnums=(0, 1), has_aux=True
         )(physical_params, critic.fp8_meta)
-        if getattr(critic.apply_fn, 'critic_residual_compute_format', 'legacy') == 'legacy':
+        if getattr(critic.apply_fn, 'critic_residual_compute_format', 'legacy') in ('legacy', 'hybrid'):
             backward_fp8_meta = _merge_resident_backward_metadata(critic.fp8_meta, backward_fp8_meta)
         else:
             backward_fp8_meta = critic.fp8_meta

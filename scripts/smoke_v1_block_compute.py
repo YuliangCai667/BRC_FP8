@@ -29,12 +29,15 @@ def check_finite(tree):
             assert bool(jnp.all(jnp.isfinite(x))), (x.shape,x.dtype)
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--format',default='mxfp8');p.add_argument('--output',type=Path,required=True);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--format',choices=('legacy','hybrid','mxfp8'),default='hybrid');p.add_argument('--output',type=Path,required=True);a=p.parse_args()
     a.output.mkdir(parents=True,exist_ok=False)
-    report={'format':a.format,'status':'STARTED','backend':'CUTLASS SM120 native block-scaled','kernel_build_hash':register()[1]}
+    report={'format':a.format,'status':'STARTED','backend':'XLA per-tensor FP8 hybrid'}
+    if a.format == 'mxfp8':
+        report.update(backend='CUTLASS SM120 native block-scaled',kernel_build_hash=register()[1])
     def save(): (a.output/'report.json').write_text(json.dumps(report,indent=2))
     save()
     env=ParallelEnv(get_environment_list('DMC_DOGS'),seed=42)
+    env.action_space.seed(42)
     obs=env.reset();act=np.zeros(env.action_space.shape,np.float32)
     agent=BRC(42,obs[:1],act[:1],num_tasks=4,updates_per_step=2,width_critic=4096,task_embedding_norm='l1',critic_precision='fp8_resident',fp8_resident_carry=True,target_critic_precision='fp8_lag',critic_optimizer_state='fp8_carry',critic_residual_compute_format=a.format)
     print('initialized full learner',obs.shape,act.shape,flush=True)
@@ -43,9 +46,10 @@ def main():
     for i in range(256):
         action=env.action_space.sample()
         nxt,reward,term,trunc,_=env.step(action)
-        records.append((obs.copy(),action,reward,1-term,nxt.copy()))
+        records.append((obs.copy(),action,reward,env.generate_masks(term,trunc),nxt.copy()))
         obs,_,_=env.reset_where_done(nxt,term,trunc)
     arrays=[np.stack([r[i] for r in records]) for i in range(5)]
+    np.savez(a.output/'transitions.npz',**{str(i):v for i,v in enumerate(arrays)})
     rng=np.random.RandomState(20260908)
     def batch():
         ix=rng.randint(256,size=1024);tasks=rng.randint(4,size=1024)
@@ -59,6 +63,11 @@ def main():
         times.append(time.perf_counter()-t);check_finite(info)
         print(json.dumps({'update':i+1,'step':int(agent.step),'seconds':times[-1],'critic_loss':float(info['critic_loss'])}),flush=True)
     report.update(updates=16,step=int(agent.step),update_seconds=times,optimizer_inventory=optimizer_state_inventory(agent.critic.opt_state))
+    backward_meta={ '/'.join(k):np.asarray(v).tolist() for k,v in traverse_util.flatten_dict(agent.critic.fp8_meta).items()
+                   if k[-1] in ('output_grad_scale','output_grad_amax_history')}
+    report['backward_metadata']=backward_meta
+    if a.format in ('legacy','hybrid'):
+        assert all(np.max(v)>0 for k,v in backward_meta.items() if k.endswith('output_grad_amax_history'))
     check_finite((agent.actor,agent.critic,agent.target_critic,agent.temp))
     diagnostics=agent.last_online_resident_diagnostics
     report['resident_diagnostics']=host_metrics(diagnostics)

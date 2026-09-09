@@ -466,6 +466,7 @@ class BRC(object):
         critic_residual_compute_format: str = 'legacy',
         actor_training_recipe: str = 'fp32',
         actor_export_align_start: int = 450000,
+        actor_body_compute: str = 'mxfp8_main_plus_carry',
     ) -> None:
         from jaxrl.low_precision.actor_qat_dense import RECIPE
         if actor_training_recipe not in ('fp32', RECIPE):
@@ -473,6 +474,9 @@ class BRC(object):
         if actor_export_align_start < 0:
             raise ValueError('actor export alignment step must be nonnegative')
         self.actor_training_recipe = actor_training_recipe
+        if actor_body_compute not in ('mxfp8_main_plus_carry', 'hybrid_main_plus_carry'):
+            raise ValueError('unknown actor body compute')
+        self.actor_body_compute = actor_body_compute
         self.actor_export_align_start = actor_export_align_start
         self.actor_env_step = 0
         if critic_optimizer_state not in MOMENT_MODES:
@@ -505,8 +509,8 @@ class BRC(object):
         self.fp8_resident_canonicalization = fp8_resident_canonicalization
         if critic_residual_compute_format != 'legacy':
             from jaxrl.low_precision.block_formats import FORMATS
-            if critic_residual_compute_format not in FORMATS:
-                raise ValueError('Unsupported native residual format')
+            if critic_residual_compute_format not in (*FORMATS, 'hybrid'):
+                raise ValueError('Unsupported residual compute format')
             if critic_precision != 'fp8_resident' or not fp8_resident_carry:
                 raise ValueError('Native two-term compute requires resident CARRY')
         self.critic_residual_compute_format = critic_residual_compute_format
@@ -531,6 +535,8 @@ class BRC(object):
             rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
             actor_def = NormalTanhPolicy(action_dim=action_dim, hidden_dims=width_actor,
                                         actor_training_recipe=actor_training_recipe,
+                                        actor_body_compute=actor_body_compute,
+                                        fp8_amax_history_length=fp8_amax_history_length,
                                         actor_export_aligned=actor_export_align_start == 0)
             critic_def = Critic(
                 num_tasks=num_tasks,
@@ -954,6 +960,7 @@ class BRC(object):
                 'task_entropies': np.asarray(self.task_entropies),
                 'task_entropy_counts': np.asarray(self.task_entropy_counts),
                 'actor_training_recipe': self.actor_training_recipe,
+                'actor_body_compute': self.actor_body_compute,
                 'actor_export_align_start': self.actor_export_align_start,
                 'actor_env_step': self.actor_env_step,
                 'actor_phase': self.actor_phase,
@@ -989,6 +996,8 @@ class BRC(object):
             if state.get('actor_training_recipe', 'fp32') != self.actor_training_recipe:
                 raise ValueError('checkpoint actor recipe mismatch')
             if self.actor_training_recipe != 'fp32':
+                if state.get('actor_body_compute', 'mxfp8_main_plus_carry') != self.actor_body_compute:
+                    raise ValueError('checkpoint actor compute format mismatch')
                 if state.get('actor_export_align_start') != self.actor_export_align_start:
                     raise ValueError('checkpoint actor phase threshold mismatch')
                 self.set_env_step(state['actor_env_step'])

@@ -23,6 +23,8 @@ class ActorQatDense(nn.Module):
     features: int
     body: bool = False
     export_aligned: bool = False
+    body_compute: str = 'mxfp8_main_plus_carry'
+    fp8_amax_history_length: int = 1024
     kernel_init: object = nn.initializers.orthogonal(jnp.sqrt(2))
 
     @nn.compact
@@ -30,6 +32,11 @@ class ActorQatDense(nn.Module):
         kernel = self.param('kernel', self.kernel_init, (x.shape[-1], self.features), jnp.float32)
         bias = self.param('bias', nn.initializers.zeros_init(), (self.features,), jnp.float32)
         if self.body:
+            if self.body_compute == 'hybrid_main_plus_carry':
+                grad_scale = self.variable(OVERWRITE_WITH_GRADIENT, 'output_grad_scale',
+                                           lambda: jnp.ones(1, jnp.float32)).value
+                grad_history = self.variable(OVERWRITE_WITH_GRADIENT, 'output_grad_amax_history',
+                    lambda: jnp.zeros(self.fp8_amax_history_length, jnp.float32)).value
             scale = self.variable(OVERWRITE_WITH_GRADIENT, 'kernel_scale', lambda: jnp.float32(1)).value
             carry = self.variable(OVERWRITE_WITH_GRADIENT, 'kernel_carry',
                                   lambda: jnp.zeros(kernel.shape, jnp.float8_e4m3fn)).value
@@ -41,13 +48,19 @@ class ActorQatDense(nn.Module):
                 logical = kernel.astype(jnp.float32)
                 main = self.get_variable('actor_payload', 'kernel')
             if not self.export_aligned and not self.is_initializing():
-                from .two_term_dense import two_term_dense
                 if main is None:
                     raise ValueError('logical actor body requires its stored main payload')
-                out = two_term_dense(x.reshape(-1, x.shape[-1]), logical,
-                                     jax.lax.stop_gradient(main),
-                                     jax.lax.stop_gradient(carry),
-                                     jax.lax.stop_gradient(scale), bias, 'mxfp8')
+                args = (x.reshape(-1, x.shape[-1]), logical,
+                        jax.lax.stop_gradient(main), jax.lax.stop_gradient(carry),
+                        jax.lax.stop_gradient(scale), bias)
+                if self.body_compute == 'hybrid_main_plus_carry':
+                    from .hybrid_two_term_dense import hybrid_two_term_dense
+                    out = hybrid_two_term_dense(*args, grad_scale, grad_history)
+                elif self.body_compute == 'mxfp8_main_plus_carry':
+                    from .two_term_dense import two_term_dense
+                    out = two_term_dense(*args, 'mxfp8')
+                else:
+                    raise ValueError('Unsupported actor body compute')
                 return out.reshape(x.shape[:-1] + (self.features,))
         else:
             logical = kernel.astype(jnp.float32)
@@ -66,8 +79,8 @@ def logical_params(actor):
     })
 
 
-def logical_variables(actor, params):
-    variables = actor.variables(params=params)
+def logical_variables(actor, params, fp8_meta=None):
+    variables = actor.variables(params=params, fp8_meta=fp8_meta)
     variables['actor_payload'] = jax.tree.map(jax.lax.stop_gradient, actor.params)
     return variables
 
@@ -95,8 +108,11 @@ def initialize_actor(actor):
     return actor.replace(opt_state=actor.tx.init(logical_params(actor)))
 
 
-def apply_gradients(actor, params, grads, info):
+def apply_gradients(actor, params, grads, info, backward_metadata=None):
     from jaxrl.utils import tree_norm
+    if backward_metadata is not None and not actor.apply_fn.actor_export_aligned:
+        from jaxrl.agent.update import _merge_resident_backward_metadata
+        actor = actor.replace(fp8_meta=_merge_resident_backward_metadata(actor.fp8_meta, backward_metadata))
     updates, state = actor.tx.update(grads, actor.opt_state, params)
     candidate = optax.apply_updates(params, updates)
     info['grad_norm'] = tree_norm(grads)

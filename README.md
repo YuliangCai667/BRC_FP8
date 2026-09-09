@@ -4,6 +4,15 @@ https://arxiv.org/pdf/2505.23150
 
 This branch contains the implementation of the BRC algorithm.
 
+The current actor deployment experiment uses per-tensor E4M3 forward / E5M2
+backward with true CARRY contributions in both critic and actor bodies.
+`bash scripts/run_actor_qat_fp8_export.sh` runs the fixed seed42 protocol and
+automatically aligns/exports the actor as W8A16. For the FP32-actor baseline or
+isolated critic change, use `bash scripts/run_hybrid_critic.sh legacy` or
+`bash scripts/run_hybrid_critic.sh hybrid`. See the
+[implementation and validation record](development_records/2026-09-09-hybrid-carry-actor-export.md)
+and [protocol configuration](configs/actor_qat_fp8_export_v1.yaml).
+
 ## Example usage
 
 To run the BRC algorithm in a single task mode, just pass a single task name to the `env_names` variable:

@@ -80,6 +80,43 @@ class Codec(unittest.TestCase):
 
 
 class Storage(unittest.TestCase):
+    def test_hybrid_actor_metadata_updates_and_survives_alignment(self):
+        from jaxrl.agent.brc_learner import BRC
+        from jaxrl.utils import Batch
+        agent=BRC(4,np.zeros((1,4),np.float32),np.zeros((1,2),np.float32),
+                  num_tasks=2,width_actor=16,width_critic=16,updates_per_step=1,
+                  actor_training_recipe=aq.RECIPE,actor_body_compute='hybrid_main_plus_carry',
+                  critic_precision='fp8_resident',fp8_resident_carry=True,
+                  critic_residual_compute_format='hybrid',critic_optimizer_state='fp8_carry',
+                  target_critic_precision='fp8_lag',fp8_amax_history_length=8)
+        rng=np.random.default_rng(3)
+        batch=Batch(rng.normal(size=(1,16,4)).astype(np.float32),
+                    np.tanh(rng.normal(size=(1,16,2))).astype(np.float32),
+                    np.full((1,16),.01,np.float32),np.ones((1,16),np.float32),
+                    rng.normal(size=(1,16,4)).astype(np.float32),np.tile([0,1],8)[None].astype(np.int32))
+        for step in range(4):jax.block_until_ready(agent.update(batch,1,step))
+        old={p:np.asarray(v) for p,v in traverse_util.flatten_dict(agent.actor.fp8_meta).items()
+             if p[-1].startswith('output_grad_')}
+        self.assertEqual(len(old),4)
+        self.assertTrue(all(np.max(v)>0 for v in old.values()))
+        agent.set_env_step(450000)
+        jax.block_until_ready(agent.update(batch,1,450000))
+        new=traverse_util.flatten_dict(agent.actor.fp8_meta)
+        for p,v in old.items(): np.testing.assert_array_equal(new[p],v)
+        self.assertEqual(agent.actor.apply_fn.actor_body_compute,'hybrid_main_plus_carry')
+        self.assertEqual(agent.target_critic.apply_fn.critic_residual_compute_format,'legacy')
+        self.assertTrue(all(str(v.dtype)=='float32' for v in jax.tree.leaves(agent.actor.opt_state[0].mu)))
+        with tempfile.TemporaryDirectory() as directory:
+            agent.save(directory)
+            agent.set_env_step(449999)
+            agent.load(directory)
+            self.assertEqual(agent.actor_phase,'export_align')
+            restored=traverse_util.flatten_dict(agent.actor.fp8_meta)
+            for p,v in old.items(): np.testing.assert_array_equal(restored[p],v)
+            agent.actor_body_compute='mxfp8_main_plus_carry'
+            with self.assertRaisesRegex(ValueError,'compute format mismatch'):
+                agent.load(directory)
+
     def test_storage_optimizer_and_nonzero_initial_carry(self):
         a = actor()
         kernels = {p:v for p,v in traverse_util.flatten_dict(a.params).items() if p[-1]=='kernel'}

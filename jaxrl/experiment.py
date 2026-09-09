@@ -464,6 +464,7 @@ class ExperimentRecorder:
             "cuda_environment": {
                 "CUDA_ROOT": os.environ.get("CUDA_ROOT"),
                 "CUDA_HOME": os.environ.get("CUDA_HOME"),
+                "XLA_FLAGS": os.environ.get("XLA_FLAGS"),
                 "ptxas_path": ptxas_path,
                 "ptxas_version": safe_command([ptxas_path, "--version"]) if ptxas_path else None,
             },

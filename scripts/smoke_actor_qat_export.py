@@ -30,17 +30,21 @@ def finite(tree):
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--output',type=Path,required=True);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--format',choices=('hybrid','mxfp8'),default='hybrid');a=p.parse_args()
     a.output.mkdir(parents=True,exist_ok=False)
-    report=dict(status='STARTED',backend='CUTLASS SM120 native MXFP8',phases={})
+    report=dict(status='STARTED',backend=a.format,phases={})
     def save(): (a.output/'report.json').write_text(json.dumps(report,indent=2))
-    save(); register()
+    save()
+    if a.format == 'mxfp8': register()
     env=ParallelEnv(get_environment_list('DMC_DOGS'),seed=42)
+    env.action_space.seed(42)
     obs=env.reset();act=np.zeros(env.action_space.shape,np.float32)
     agent=BRC(42,obs[:1],act[:1],num_tasks=4,updates_per_step=2,width_critic=4096,
         task_embedding_norm='l1',critic_precision='fp8_resident',fp8_resident_carry=True,
         target_critic_precision='fp8_lag',critic_optimizer_state='fp8_carry',
-        critic_residual_compute_format='mxfp8',actor_training_recipe=RECIPE)
+        critic_residual_compute_format=a.format,actor_training_recipe=RECIPE,
+        actor_body_compute=a.format+'_main_plus_carry')
     jax.block_until_ready(agent.actor.params)
     report['initial_carry_nonzero_fraction']={ '/'.join(p):float(np.mean(np.asarray(v).astype(np.float32)!=0))
         for p,v in traverse_util.flatten_dict(agent.actor.fp8_meta).items() if p[-1]=='kernel_carry'}
@@ -106,12 +110,18 @@ def main():
         for p,v in traverse_util.flatten_dict(agent.actor.params).items():
             if p[-1]=='kernel': assert str(v.dtype)==('float8_e4m3fn' if is_body(p) else 'bfloat16')
         assert all(str(v.dtype)=='float32' for v in jax.tree.leaves((agent.actor.opt_state[0].mu,agent.actor.opt_state[0].nu)))
+        if a.format == 'hybrid':
+            histories={ '/'.join(p):float(np.max(np.asarray(v))) for p,v in traverse_util.flatten_dict(agent.actor.fp8_meta).items()
+                        if p[-1]=='output_grad_amax_history'}
+            assert len(histories)==2 and all(v>0 for v in histories.values()),histories
+            report.setdefault('actor_gradient_history_max',{})[phase]=histories
         report['phases'][phase]=dict(updates=16,update_seconds=times,restore_max_error=maxerr,restore_rtol=1e-6,restore_atol=1e-7,
             actor_kernel_gradient_norms=norms,actor_q_only_kernel_gradient_norms=qnorms,
             dq_da_norm=float(jnp.linalg.norm(dq)),actor_phase=agent.actor_phase,step=int(agent.step))
         save()
     assert agent.target_critic.apply_fn.critic_residual_compute_format=='legacy'
-    config=dict(actor_training_recipe=RECIPE,resolved_task_embedding_norm='l1',actor_preprocessing=preprocessing_manifest(env))
+    config=dict(actor_training_recipe=RECIPE,actor_body_compute=a.format+'_main_plus_carry',
+                critic_residual_compute_format=a.format,resolved_task_embedding_norm='l1',actor_preprocessing=preprocessing_manifest(env))
     manager=CheckpointManager(a.output/'checkpoints','actor_smoke',a.output,get_environment_list('DMC_DOGS'),config)
     final=manager.save_analysis(agent,450015)
     package=a.output/'actor_smoke_package'

@@ -216,7 +216,6 @@ class ResidentFp8Dense(nn.Module):
             )
 
         if self.critic_residual_compute_format != 'legacy':
-            from jaxrl.low_precision.two_term_dense import two_term_dense
             carry_codes = self.get_variable(OVERWRITE_WITH_GRADIENT, 'kernel_carry')
             if not self.carry or carry_codes is None:
                 raise ValueError('Two-term compute requires persistent CARRY weights')
@@ -224,9 +223,16 @@ class ResidentFp8Dense(nn.Module):
             carry_codes = lax.stop_gradient(carry_codes)
             scale = lax.stop_gradient(kernel_scale)
             x = jnp.asarray(inputs, dtype=jnp.float32)
-            out = two_term_dense(x.reshape(-1, x.shape[-1]), physical_kernel,
-                                 codes.astype(jnp.float32), carry_codes.astype(jnp.float32),
-                                 scale, bias, self.critic_residual_compute_format)
+            if self.critic_residual_compute_format == 'hybrid':
+                from jaxrl.low_precision.hybrid_two_term_dense import hybrid_two_term_dense
+                out = hybrid_two_term_dense(
+                    x.reshape(-1, x.shape[-1]), physical_kernel, codes, carry_codes,
+                    scale, bias, output_grad_scale, output_grad_amax_history)
+            else:
+                from jaxrl.low_precision.two_term_dense import two_term_dense
+                out = two_term_dense(x.reshape(-1, x.shape[-1]), physical_kernel,
+                                     codes.astype(jnp.float32), carry_codes.astype(jnp.float32),
+                                     scale, bias, self.critic_residual_compute_format)
             self.sow('intermediates', 'activation', x)
             return out.reshape(x.shape[:-1] + (self.features,))
 
@@ -389,12 +395,15 @@ class BronetBlock(nn.Module):
     fp8_amax_history_length: int = 1024
     actor_qat: bool = False
     actor_export_aligned: bool = False
+    actor_body_compute: str = 'mxfp8_main_plus_carry'
 
     def _dense(self, name: str):
         if self.actor_qat:
             from jaxrl.low_precision.actor_qat_dense import ActorQatDense
             return ActorQatDense(self.hidden_dims, body=True,
-                                 export_aligned=self.actor_export_aligned, name=name)
+                                 export_aligned=self.actor_export_aligned,
+                                 body_compute=self.actor_body_compute,
+                                 fp8_amax_history_length=self.fp8_amax_history_length, name=name)
         return _precision_dense(
             self.hidden_dims,
             name,
@@ -436,6 +445,7 @@ class BroNet(nn.Module):
     fp8_amax_history_length: int = 1024
     actor_qat: bool = False
     actor_export_aligned: bool = False
+    actor_body_compute: str = 'mxfp8_main_plus_carry'
 
     def _edge_dense(self, name: str, features: int):
         if self.actor_qat:
@@ -478,6 +488,7 @@ class BroNet(nn.Module):
                 fp8_amax_history_length=self.fp8_amax_history_length,
                 actor_qat=self.actor_qat,
                 actor_export_aligned=self.actor_export_aligned,
+                actor_body_compute=self.actor_body_compute,
             )(x)
         if self.add_final_layer:
             x = self._edge_dense('Dense_1', self.output_nodes)(x)
@@ -647,12 +658,16 @@ class NormalTanhPolicy(nn.Module):
     log_std_max: float = 2.0
     actor_training_recipe: str = 'fp32'
     actor_export_aligned: bool = False
+    actor_body_compute: str = 'mxfp8_main_plus_carry'
+    fp8_amax_history_length: int = 1024
 
     @nn.compact
     def __call__(self, observations: jnp.ndarray, temperature: float = 1.0, return_stats: bool = False):
         qat = self.actor_training_recipe == 'carry_body_bf16_edge_qat'
         outputs = BroNet(hidden_dims=self.hidden_dims, depth=self.depth, activations=self.activations, add_final_layer=False, output_nodes=None,
-                         actor_qat=qat, actor_export_aligned=self.actor_export_aligned)(observations)
+                         actor_qat=qat, actor_export_aligned=self.actor_export_aligned,
+                         actor_body_compute=self.actor_body_compute,
+                         fp8_amax_history_length=self.fp8_amax_history_length)(observations)
         if qat:
             from jaxrl.low_precision.actor_qat_dense import ActorQatDense
             means = ActorQatDense(self.action_dim, kernel_init=default_init(), name='Dense_0')(outputs)

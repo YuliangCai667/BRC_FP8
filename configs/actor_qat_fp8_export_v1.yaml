@@ -1,6 +1,7 @@
 # Fixed protocol. scripts/run_actor_qat_fp8_export.sh is the executable entrypoint.
-base_commit: 1dd21cb8b420f32c3c3bc33d8a0cd8f11a86ce6d
-imported_fix: ceil_amax_over_448_no_overflow
+base_commit: affa7ea
+compute_recipe: per_tensor_e4m3_forward_e5m2_delayed_backward_two_term_carry
+xla_flags: --xla_gpu_autotune_level=0
 env_names: DMC_DOGS
 seed: 42
 max_steps: 500000
@@ -11,7 +12,7 @@ width_critic: 4096
 actor_width: 256
 actor_depth: 1
 actor_training_recipe: carry_body_bf16_edge_qat
-actor_body_compute: mxfp8_main_plus_carry
+actor_body_compute: hybrid_main_plus_carry
 actor_edge_storage: bf16
 actor_weight_qat: true
 actor_export_codec: e4m3fn_block32_fp32scale_rtn_v1
@@ -26,7 +27,7 @@ actor_adamw:
   moments: fp32
 critic_precision: fp8_resident
 fp8_resident_carry: true
-critic_residual_compute_format: mxfp8
+critic_residual_compute_format: hybrid
 critic_optimizer_state: fp8_carry
 target_critic_precision: fp8_lag
 fp8_all_dense_kernels: false

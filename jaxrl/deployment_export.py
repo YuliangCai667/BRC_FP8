@@ -150,7 +150,9 @@ def checkpoint_policy(checkpoint):
     definition = NormalTanhPolicy(action_dim=flat['Dense_0/kernel'].shape[1],
         hidden_dims=flat['BroNet_0/Dense_0/kernel'].shape[1],
         depth=len({p.split('/')[1] for p in flat if '/BronetBlock_' in p}),
-        actor_training_recipe=RECIPE, actor_export_aligned=manifest['actor_phase'] == 'export_align')
+        actor_training_recipe=RECIPE, actor_export_aligned=manifest['actor_phase'] == 'export_align',
+        actor_body_compute=manifest['config'].get('actor_body_compute','mxfp8_main_plus_carry'),
+        fp8_amax_history_length=manifest['config'].get('fp8_amax_history_length',1024))
     actor = Model(step=raw['step'], apply_fn=definition, params=raw['params'], tx=None, fp8_meta=raw['fp8_meta'])
     critic_raw = serialization.msgpack_restore((checkpoint / 'critic.msgpack').read_bytes())
     emb = traverse_util.flatten_dict(critic_raw['params'], sep='/').get('task_embedding/embeddings/embedding')
