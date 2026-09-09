@@ -81,3 +81,19 @@ MXFP8 optimizer trajectory. The actor's export codec remains E4M3 plus FP32
 block32 scales (1.125 bytes/weight before padding), separate from the per-tensor
 hybrid training compute. Final return and deployment quality remain pending
 until the formal run and its final export/evaluation finish.
+
+## Formal launch
+
+Code commit `86c326c`, GPU1 (`GPU-280b96e2-67fc-577e-ba63-1ccd9493c231`),
+PID `173863`, tmux session `brc_actor_hybrid_fp8_gpu1_20260909_203112` on
+`/home/caiyuliang/brc_v1_audit/tmux.sock`. The new run shares GPU1 with existing
+work; no existing experiment was stopped. Initial acceptance reached env 5k /
+update counter 3 with finite actor loss 26.79994 and critic loss 24.30795,
+zero recorded NaN/Inf, and the intended hybrid/FP8-Adam/LAG configuration.
+
+[W&B run](https://wandb.ai/cai200661-sun-yat/FP8%20RL/runs/actor-hybrid-carry-fp8-s42-gpu1-20260909_203112).
+Runtime artifacts are under
+`/home/caiyuliang/brc_v1_runs/DMC_DOGS/actor_hybrid_carry_fp8_export_s42_gpu1_20260909_203112`.
+Launch metadata is in `/home/caiyuliang/brc_v1_audit/actor_hybrid_fp8_export_launch.json`;
+the reproducible short-check summary is in
+`/home/caiyuliang/brc_v1_audit/hybrid_carry_validation/summary.json`.
