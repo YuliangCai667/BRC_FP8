@@ -8,6 +8,41 @@ import numpy as np
 from jaxrl.low_precision import block_formats as bf
 mod=importlib.import_module('jaxrl.low_precision.two_term_dense')
 
+class Packing(unittest.TestCase):
+    def test_saved_e4m3_codes_survive_both_reduction_directions(self):
+        # CARRY storage already consists of E4M3 values. Packing either
+        # orientation must preserve these operands, including the 240 case.
+        import ml_dtypes
+        values = np.arange(256, dtype=np.uint8).view(ml_dtypes.float8_e4m3fn).astype(np.float32)
+        values[~np.isfinite(values)] = 0
+        rng = np.random.default_rng(42)
+        codes = rng.choice(values, size=(129, 257))
+        codes[0, :256] = values
+        codes[1, :32] = 240
+        codes[2, :32] = -240
+        roundtrip = jax.jit(lambda x: bf.unpack(bf.pack(x)))
+        for source in (codes, codes.T):
+            np.testing.assert_array_equal(roundtrip(jnp.asarray(source)), source)
+
+    def test_block_maximum_fits_in_selected_scale(self):
+        # Include values immediately above exact capacities, broad exponents,
+        # all-zero blocks, and irregular sizes exercising padding/swizzling.
+        maxima = np.array([0, 224, np.nextafter(np.float32(224), np.float32(np.inf)),
+                           240, 256, 448, np.nextafter(np.float32(448), np.float32(np.inf)),
+                           480, 511], dtype=np.float32)
+        maxima = np.concatenate([np.ldexp(maxima, e) for e in (-100, -10, 0, 10, 100)])
+        source = np.broadcast_to(maxima[:, None], (len(maxima), 33)).copy()
+        codes, scales, _ = jax.jit(bf.pack)(jnp.asarray(source))
+        rp, kp = codes.shape
+        exponents = np.asarray(scales).reshape(rp//128, kp//128, 32, 4, 4).transpose(0, 3, 2, 1, 4).reshape(rp, kp//32).astype(np.int32) - 127
+        capacity = 448 * np.exp2(exponents.astype(np.float64))
+        self.assertTrue(np.all(np.abs(source) <= np.repeat(capacity, 32, axis=1)[:len(source), :33]))
+        # The selected power of two is minimal for these normal-range values.
+        self.assertTrue(np.all((maxima > capacity[:len(source), 0]/2) | (maxima == 0)))
+        restored = np.asarray(bf.unpack((codes, scales, source.shape)))
+        self.assertTrue(np.isfinite(restored).all())
+        np.testing.assert_array_equal(restored[maxima == 0], 0)
+
 class Algebra(unittest.TestCase):
     def test_identity_quantizer(self):
         x=jnp.arange(15,dtype=jnp.float32).reshape(3,5)/11

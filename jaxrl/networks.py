@@ -387,8 +387,14 @@ class BronetBlock(nn.Module):
     fp8_resident_carry: bool = False
     critic_residual_compute_format: str = 'legacy'
     fp8_amax_history_length: int = 1024
+    actor_qat: bool = False
+    actor_export_aligned: bool = False
 
     def _dense(self, name: str):
+        if self.actor_qat:
+            from jaxrl.low_precision.actor_qat_dense import ActorQatDense
+            return ActorQatDense(self.hidden_dims, body=True,
+                                 export_aligned=self.actor_export_aligned, name=name)
         return _precision_dense(
             self.hidden_dims,
             name,
@@ -428,8 +434,13 @@ class BroNet(nn.Module):
     fp8_input_dense_kernel: bool = False
     fp8_output_dense_kernel: bool = False
     fp8_amax_history_length: int = 1024
+    actor_qat: bool = False
+    actor_export_aligned: bool = False
 
     def _edge_dense(self, name: str, features: int):
+        if self.actor_qat:
+            from jaxrl.low_precision.actor_qat_dense import ActorQatDense
+            return ActorQatDense(features, export_aligned=self.actor_export_aligned, name=name)
         enabled = self.fp8_all_dense_kernels or (
             self.fp8_input_dense_kernel
             if name == 'Dense_0'
@@ -465,6 +476,8 @@ class BroNet(nn.Module):
                 fp8_resident_carry=self.resident_fp8_carry,
                 critic_residual_compute_format=self.critic_residual_compute_format,
                 fp8_amax_history_length=self.fp8_amax_history_length,
+                actor_qat=self.actor_qat,
+                actor_export_aligned=self.actor_export_aligned,
             )(x)
         if self.add_final_layer:
             x = self._edge_dense('Dense_1', self.output_nodes)(x)
@@ -632,15 +645,27 @@ class NormalTanhPolicy(nn.Module):
     log_std_scale: float = 1.0
     log_std_min: float =  -10.0
     log_std_max: float = 2.0
+    actor_training_recipe: str = 'fp32'
+    actor_export_aligned: bool = False
 
     @nn.compact
-    def __call__(self, observations: jnp.ndarray, temperature: float = 1.0):
-        outputs = BroNet(hidden_dims=self.hidden_dims, depth=self.depth, activations=self.activations, add_final_layer=False, output_nodes=None)(observations)
-        means = nn.Dense(self.action_dim, kernel_init=default_init())(outputs)
-        log_stds = nn.Dense(self.action_dim, kernel_init=default_init(self.log_std_scale))(outputs)
+    def __call__(self, observations: jnp.ndarray, temperature: float = 1.0, return_stats: bool = False):
+        qat = self.actor_training_recipe == 'carry_body_bf16_edge_qat'
+        outputs = BroNet(hidden_dims=self.hidden_dims, depth=self.depth, activations=self.activations, add_final_layer=False, output_nodes=None,
+                         actor_qat=qat, actor_export_aligned=self.actor_export_aligned)(observations)
+        if qat:
+            from jaxrl.low_precision.actor_qat_dense import ActorQatDense
+            means = ActorQatDense(self.action_dim, kernel_init=default_init(), name='Dense_0')(outputs)
+            log_stds = ActorQatDense(self.action_dim, kernel_init=default_init(self.log_std_scale), name='Dense_1')(outputs)
+        else:
+            means = nn.Dense(self.action_dim, kernel_init=default_init())(outputs)
+            log_stds = nn.Dense(self.action_dim, kernel_init=default_init(self.log_std_scale))(outputs)
+        raw_log_stds = log_stds
         log_stds = self.log_std_min + (self.log_std_max - self.log_std_min) * 0.5 * (1 + nn.tanh(log_stds))
         stds = jnp.exp(log_stds)
         stds = stds * temperature
+        if return_stats:
+            return means, raw_log_stds, log_stds, stds
         base_dist = distrax.MultivariateNormalDiag(loc=means, scale_diag=stds)
         tanh_dist = distrax.Transformed(base_dist, distrax.Block(distrax.Tanh(), 1))
         return tanh_dist

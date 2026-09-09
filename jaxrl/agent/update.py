@@ -12,6 +12,7 @@ from jaxrl.networks import (
     quantize_e4m3_per_tensor,
 )
 from jaxrl.utils import Batch, Model, PRNGKey, tree_norm
+from jaxrl.low_precision import actor_qat_dense as actor_qat
 
 
 def _is_resident_kernel(path, model=None):
@@ -445,7 +446,19 @@ def update_actor(key: PRNGKey, actor: Model, critic: Model, temp: Model, batch: 
             '_entropy_counts_by_task': entropy_counts,
             'actor_pnorm': tree_norm(actor_variables['params']),
         }
-    if critic.fp8_meta is None:
+    if actor_qat.enabled(actor):
+        params = actor_qat.logical_params(actor)
+        def logical_loss(params, critic_meta):
+            return actor_loss_fn(actor_qat.logical_variables(actor, params), critic_meta)
+        (grads, new_fp8_meta), info = jax.grad(logical_loss, argnums=(0, 1), has_aux=True)(params, critic.fp8_meta)
+        new_actor, info = actor_qat.apply_gradients(actor, params, grads, info)
+        if _critic_precision(critic) == 'fp8_resident':
+            if getattr(critic.apply_fn, 'critic_residual_compute_format', 'legacy') == 'legacy':
+                new_fp8_meta = _merge_resident_backward_metadata(critic.fp8_meta, new_fp8_meta)
+            else:
+                new_fp8_meta = critic.fp8_meta
+        new_critic = critic.replace(fp8_meta=new_fp8_meta)
+    elif critic.fp8_meta is None:
         new_actor, info = actor.apply_gradient(actor_loss_fn)
         new_critic = critic
     else:
@@ -1193,6 +1206,7 @@ def get_actor_gradients(
     num_bins: int,
     v_max: float,
     multitask: bool,
+    q_only: bool = False,
 ):
     """Compute actor gradients for low-frequency numerical diagnostics."""
     inputs = build_actor_input(critic, batch.observations, batch.task_ids, multitask)
@@ -1204,8 +1218,10 @@ def get_actor_gradients(
         q_probs = jax.nn.softmax(q_logits, axis=-1).mean(axis=0)
         bin_values = jnp.linspace(-v_max, v_max, num_bins)[None]
         q_values = (bin_values * q_probs).sum(-1)
-        return (log_probs * temp().mean() - q_values).mean()
+        return -q_values.mean() if q_only else (log_probs * temp().mean() - q_values).mean()
 
+    if actor_qat.enabled(actor):
+        return jax.grad(lambda p: loss_fn(actor_qat.logical_variables(actor, p)))(actor_qat.logical_params(actor))
     return jax.grad(loss_fn)(actor.variables())['params']
 
 

@@ -17,6 +17,8 @@ import numpy as np
 CHECKPOINT_SCHEMA_VERSION = 1
 
 RESUME_CONFIG_KEYS = [
+    "actor_training_recipe", "actor_body_compute", "actor_edge_storage",
+    "actor_weight_qat", "actor_export_codec", "actor_export_align_start",
     "critic_residual_compute_format", "critic_residual_compute_terms",
     "critic_residual_compute_rounding", "critic_residual_compute_rht",
     "method_version", "kernel_build_hash", "dependency_manifest_hash",
@@ -38,6 +40,10 @@ RESUME_CONFIG_KEYS = [
 
 def checkpoint_config_value(config: Mapping[str, Any], key: str):
     """Interpret protocol fields missing from historical checkpoints."""
+    if key == 'actor_training_recipe':
+        return config.get(key, 'fp32')
+    if key.startswith('actor_') and config.get('actor_training_recipe', 'fp32') == 'fp32':
+        return None
     if key == "critic_optimizer_state":
         return config.get(key, "fp32")
     if key == "optimizer_moment_block_size":
@@ -397,6 +403,8 @@ class CheckpointManager:
             "created_at": time.time(),
             "env_step": int(env_step),
             "update_step": int(agent.step),
+            "actor_phase": getattr(agent, 'actor_phase', 'fp32'),
+            "actor_env_step": getattr(agent, 'actor_env_step', int(env_step)),
             "run_id": self.run_id,
             "run_dir": self.run_dir,
             "task_names": self.task_names,
@@ -436,6 +444,15 @@ class CheckpointManager:
                 optimizer_state_inventory(agent.critic.opt_state)
                 if fields.get("includes_optimizer") else None
             ),
+            "actor_optimizer_inventory": (
+                optimizer_state_inventory(agent.actor.opt_state)
+                if fields.get("includes_optimizer") else None
+            ),
+            "actor_state_bytes": {
+                "parameters": _tree_nbytes(agent.actor.params),
+                "carry_and_scales": _tree_nbytes(agent.actor.fp8_meta),
+                "optimizer": _tree_nbytes(agent.actor.opt_state) if fields.get('includes_optimizer') else 0,
+            },
             **fields,
         }
 
@@ -476,6 +493,7 @@ class CheckpointManager:
         wandb_id: Optional[str],
         save_replay_buffer: bool = True,
         is_final: bool = False,
+        is_phase_transition: bool = False,
     ):
         final_path = self.root / f"recovery_step_{int(env_step):012d}"
         if (final_path / "COMPLETE").exists():
@@ -509,6 +527,7 @@ class CheckpointManager:
                 "recovery", env_step, agent, includes_optimizer=True,
                 includes_replay_buffer=replay_saved, degraded_reason=degraded_reason,
                 wandb_id=wandb_id, is_final=bool(is_final),
+                is_phase_transition=bool(is_phase_transition),
                 fixed_anchor_norms=fixed_anchor_report,
             )
             (temp_path / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -575,7 +594,10 @@ class CheckpointManager:
         final_candidates = []
         for path in candidates:
             try:
-                if self.read_manifest(path).get("is_final"):
+                manifest = self.read_manifest(path)
+                if manifest.get('is_phase_transition'):
+                    preserved.add(path)
+                if manifest.get("is_final"):
                     final_candidates.append(path)
             except Exception:
                 continue

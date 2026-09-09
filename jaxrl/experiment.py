@@ -484,7 +484,12 @@ class ExperimentRecorder:
         if freeze:
             (self.run_dir / "artifacts" / "pip_freeze.txt").write_text(freeze + "\n", encoding="utf-8")
         snapshot_root = self.run_dir / "artifacts" / "source_snapshot"
-        for source in [Path("train.py"), *Path("jaxrl").rglob("*.py")]:
+        sources = [Path("train.py"), *Path("jaxrl").rglob("*.py")]
+        if config.get('actor_training_recipe', 'fp32') != 'fp32':
+            sources.extend(Path('deployment').rglob('*.py'))
+            sources.extend(Path('scripts').glob('*actor*.py'))
+            sources.extend([Path('scripts/run_actor_qat_fp8_export.sh'), Path('configs/actor_qat_fp8_export_v1.yaml')])
+        for source in sources:
             if source.is_file():
                 target = snapshot_root / source
                 target.parent.mkdir(parents=True, exist_ok=True)

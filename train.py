@@ -131,6 +131,13 @@ flags.DEFINE_integer('keep_last_analysis_checkpoints', 2, 'Recent analysis check
 flags.DEFINE_integer('keep_last_recovery_checkpoints', 1, 'Recent recovery checkpoints to retain.')
 flags.DEFINE_boolean('save_replay_buffer', True, 'Include valid replay data in recovery checkpoints.')
 flags.DEFINE_string('resume_from', '', 'Recovery checkpoint or run directory to resume.')
+flags.DEFINE_enum('actor_training_recipe', 'fp32', ['fp32', 'carry_body_bf16_edge_qat'], 'Actor storage and update recipe.')
+flags.DEFINE_enum('actor_body_compute', 'mxfp8_main_plus_carry', ['mxfp8_main_plus_carry'], 'Main phase actor residual compute.')
+flags.DEFINE_enum('actor_edge_storage', 'bf16', ['bf16'], 'QAT edge persistent dtype.')
+flags.DEFINE_boolean('actor_weight_qat', True, 'Enable edge weight QAT in the actor recipe.')
+flags.DEFINE_enum('actor_export_codec', 'e4m3fn_block32_fp32scale_rtn_v1', ['e4m3fn_block32_fp32scale_rtn_v1'], 'Shared QAT / export codec.')
+flags.DEFINE_integer('actor_export_align_start', 450000, 'Environment step to switch all actor calls to W8A16.')
+flags.DEFINE_boolean('actor_export_on_finish', False, 'Export and independently validate/evaluate the final checkpoint.')
 
 
 def _block_tree(tree):
@@ -253,10 +260,26 @@ def main(_):
     if FLAGS.critic_residual_compute_rht:
         raise ValueError('V1 fixes RHT off')
     config = FLAGS.flag_values_dict()
+    actor_qat = FLAGS.actor_training_recipe != 'fp32'
+    if actor_qat:
+        import signal
+        def actor_stop(signum, frame):
+            raise KeyboardInterrupt(f'training stopped by signal {signum}')
+        signal.signal(signal.SIGTERM, actor_stop)
+    if actor_qat and (not FLAGS.actor_weight_qat or FLAGS.actor_export_align_start < 0):
+        raise ValueError('actor recipe requires weight QAT and a nonnegative alignment step')
+    if FLAGS.actor_export_on_finish and (not actor_qat or FLAGS.max_steps < FLAGS.actor_export_align_start):
+        raise ValueError('final export requires the aligned actor recipe')
+    if actor_qat:
+        import subprocess
+        config.update(actor_base_commit='1dd21cb8b420f32c3c3bc33d8a0cd8f11a86ce6d',
+                      actor_source_commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                      resolved_actor_width=256, resolved_actor_depth=1,
+                      resolved_actor_optimizer='adamw_fp32_moments',
+                      resolved_actor_adamw=dict(learning_rate=3e-4, b1=0.9, b2=0.999, eps=1e-8, weight_decay=1e-4))
     if FLAGS.critic_residual_compute_format != 'legacy':
         from jaxrl.low_precision.backends.native import register
         import importlib.metadata
-        import hashlib
         dependencies = {name: importlib.metadata.version(name) for name in ('jax','jaxlib','flax','optax')}
         config.update(method_version=1,
                       online_residual_compute_format=FLAGS.critic_residual_compute_format,
@@ -266,8 +289,7 @@ def main(_):
                       weight_state_codec='carry_e4m3_gain16',
                       optimizer_state_codec='dual_fp8_m_v_block128_gain16', target_state_codec='lag',
                       kernel_build_hash=register()[1],
-                      dependency_manifest=dependencies,
-                      dependency_manifest_hash=hashlib.sha256(json.dumps(dependencies,sort_keys=True).encode()).hexdigest())
+                      dependency_manifest=dependencies)
     config.update({
         'carry_gain': 16.0,
         'optimizer_moment_block_size': 128,
@@ -423,11 +445,13 @@ def main(_):
     })
     if FLAGS.critic_residual_compute_format != 'legacy':
         import subprocess
+        from jaxrl.low_precision import block_formats
         config.update(
             source_commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
             comparison_group='BRC_V1_TWOTERM_20260908',
             resolved_online_fp8_backward='two_term_native_block_scaled_physical_vjp',
             resolved_online_compute_weight_scaling='independent_main_carry_reduction_blocks',
+            resolved_online_compute_scale_policy=block_formats.MXFP8_SCALE_POLICY,
             resolved_online_fp8_weight_scaling='state_current_amax_per_tensor_compute_independent_block_scales',
             resolved_evaluation_rng='separate_env_preserve_learner_and_numpy_rng',
         )
@@ -458,8 +482,8 @@ def main(_):
         import wandb
         init_kwargs = dict(
             config=config,
-            entity='',
-            project='',
+            entity=os.environ.get('WANDB_ENTITY', ''),
+            project=os.environ.get('WANDB_PROJECT', ''),
             group=FLAGS.env_names,
             name=str(FLAGS.seed) if FLAGS.wandb_name == 'auto' else FLAGS.wandb_name,
         )
@@ -506,6 +530,13 @@ def main(_):
             metaworld_reset_mode=FLAGS.metaworld_reset_mode,
         ) if FLAGS.offline_evaluation else None
         num_tasks = len(env.envs)
+        if actor_qat:
+            from jaxrl.deployment_export import preprocessing_manifest
+            config['actor_preprocessing'] = preprocessing_manifest(env)
+            config['actor_export_source_root'] = str(recorder.run_dir / 'artifacts' / 'source_snapshot')
+            recorder._write_config(config)
+            if wandb_run is not None:
+                wandb_run.config.update({'actor_preprocessing': config['actor_preprocessing']})
         agent = BRC(
             FLAGS.seed,
             env.observation_space.sample()[:1],
@@ -526,6 +557,8 @@ def main(_):
             fp8_all_dense_kernels=FLAGS.fp8_all_dense_kernels,
             fp8_input_dense_kernel=FLAGS.fp8_input_dense_kernel,
             fp8_output_dense_kernel=FLAGS.fp8_output_dense_kernel,
+            actor_training_recipe=FLAGS.actor_training_recipe,
+            actor_export_align_start=FLAGS.actor_export_align_start,
         )
         resource_devices = tuple(jax.devices())
         replay_buffer = ParallelReplayBuffer(
@@ -597,6 +630,12 @@ def main(_):
 
         for i in range(env_step + 1, FLAGS.max_steps + 1):
             env_step = i
+            phase_changed = agent.set_env_step(i)
+            if phase_changed:
+                recorder.record_event('phase_transition', i, agent.step, component='actor',
+                                      actor_phase=agent.actor_phase, optimizer_reset=False, carry_cleared=False)
+                if wandb_run is not None:
+                    wandb_run.summary['actor_phase'] = agent.actor_phase
             profiling = _profile_active(i) and i >= FLAGS.start_training
             profile = {}
 
@@ -675,6 +714,11 @@ def main(_):
                 if FLAGS.critic_residual_compute_format != 'legacy':
                     if not all(np.isfinite(np.asarray(v)).all() for v in jax.tree.leaves(latest_update_info)):
                         raise FloatingPointError('Native V1 learner produced NaN/Inf')
+                if phase_changed:
+                    _block_tree(latest_update_info)
+                    recorder.record_event('actor_phase_first_update_finished', i, agent.step,
+                        actor_phase=agent.actor_phase, update_including_compile_seconds=time.perf_counter()-start,
+                        **collect_jax_memory_stats(resource_devices))
                 if first_update_sec is None or profiling:
                     _block_tree(latest_update_info)
                 if first_update_sec is None:
@@ -705,6 +749,7 @@ def main(_):
                 active_steps = i - window_start_step
                 episode_summary = episode_recorder.interval_summary(reset=True)
                 train_metrics = {
+                    'actor_export_aligned': int(agent.actor_phase == 'export_align'),
                     **(_host_metrics(latest_update_info) if latest_update_info is not None else {}),
                     **episode_summary,
                     **completed_profile,
@@ -791,6 +836,8 @@ def main(_):
                 eval_sec = time.perf_counter() - eval_start
                 renders = eval_stats.pop('renders', None)
                 eval_metrics = {
+                    'actor_phase': agent.actor_phase,
+                    'actor_export_aligned': int(agent.actor_phase == 'export_align'),
                     'return_by_task': np.asarray(eval_stats['return']),
                     'success_by_task': np.asarray(eval_stats['goal']),
                     **_eval_aggregates(eval_stats['return'], 'return'),
@@ -873,7 +920,7 @@ def main(_):
                 FLAGS.recovery_checkpoint_interval > 0
                 and i >= FLAGS.start_training
                 and i % FLAGS.recovery_checkpoint_interval == 0
-            )
+            ) or (actor_qat and i == FLAGS.actor_export_align_start)
             if recovery_due:
                 maintenance_performed = True
                 recorder.flush(agent.step)
@@ -884,8 +931,11 @@ def main(_):
                         i, wandb_run.id if wandb_run is not None else None,
                         save_replay_buffer=FLAGS.save_replay_buffer,
                         is_final=i == FLAGS.max_steps,
+                        is_phase_transition=actor_qat and i == FLAGS.actor_export_align_start,
                     )
                     manifest = CheckpointManager.read_manifest(path)
+                    if actor_qat and i == FLAGS.actor_export_align_start and not manifest['includes_replay_buffer']:
+                        raise IOError('phase transition requires a complete recovery checkpoint including replay')
                     recorder.record_event(
                         'recovery_checkpoint_saved', i, agent.step,
                         path=str(path), checkpoint_sec=time.perf_counter() - checkpoint_start,
@@ -894,6 +944,8 @@ def main(_):
                     )
                 except Exception as error:
                     recorder.record_event('recovery_checkpoint_failed', i, agent.step, error=str(error))
+                    if actor_qat and i == FLAGS.actor_export_align_start:
+                        raise
                     print(f'[checkpoint] warning: recovery checkpoint failed: {error}')
 
             if maintenance_performed:
@@ -906,8 +958,8 @@ def main(_):
         try:
             if FLAGS.analysis_checkpoint_interval > 0:
                 checkpoint_manager.save_analysis(agent, env_step, is_final=True)
-            if FLAGS.recovery_checkpoint_interval > 0:
-                checkpoint_manager.save_recovery(
+            if FLAGS.recovery_checkpoint_interval > 0 or FLAGS.actor_export_on_finish:
+                final_checkpoint = checkpoint_manager.save_recovery(
                     agent, replay_buffer, reward_normalizer, episode_recorder,
                     env_step, wandb_run.id if wandb_run is not None else None,
                     save_replay_buffer=FLAGS.save_replay_buffer, is_final=True,
@@ -919,13 +971,38 @@ def main(_):
             )
         except Exception as error:
             recorder.record_event('final_checkpoint_failed', env_step, agent.step, error=str(error))
+            if FLAGS.actor_export_on_finish:
+                raise
             print(f'[checkpoint] warning: final checkpoint failed: {error}')
+        if FLAGS.actor_export_on_finish:
+            from jaxrl.deployment_export import finish_actor_export
+            finish_actor_export(final_checkpoint, recorder.run_dir, env, config, recorder, wandb_run)
         normal_exit = True
     except BaseException as error:
         recorder.record_event(
             'run_interrupted', env_step, agent.step if agent is not None else 0,
             error_type=type(error).__name__, error=str(error),
         )
+        if actor_qat and agent is not None and 'checkpoint_manager' in locals():
+            try:
+                state = (agent.actor, agent.critic, agent.target_critic, agent.temp)
+                finite_state = all(np.isfinite(np.asarray(x).astype(np.float32)).all()
+                                   for x in jax.tree.leaves(state))
+                if finite_state:
+                    path = checkpoint_manager.save_recovery(
+                        agent, replay_buffer, reward_normalizer, episode_recorder, env_step,
+                        wandb_run.id if wandb_run is not None else None, save_replay_buffer=True)
+                    recorder.record_event('interruption_recovery_saved', env_step, agent.step,
+                                          path=str(path), partial_environment_step_possible=True)
+                else:
+                    path = recorder.run_dir / 'artifacts' / f'nonfinite_state_step_{env_step}'
+                    path.mkdir(exist_ok=True)
+                    agent.save(str(path))
+                    (path / 'NOT_RESUMABLE').write_text(str(error))
+                    recorder.record_event('nonfinite_state_saved', env_step, agent.step,
+                                          path=str(path), resume_from='last complete periodic recovery')
+            except BaseException as save_error:
+                recorder.record_event('interruption_checkpoint_failed', env_step, agent.step, error=str(save_error))
         raise
     finally:
         recorder.close(env_step, agent.step if agent is not None else 0)

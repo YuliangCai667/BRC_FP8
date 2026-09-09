@@ -71,9 +71,15 @@ def _sample_actions(
     inputs: np.ndarray,
     temperature: float = 1.0,
 ):
-    dist = actor(inputs, temperature)
+    actor_qat = getattr(actor.apply_fn, 'actor_training_recipe', 'fp32') != 'fp32'
+    dist = actor(inputs, jnp.where(temperature == 0, 1.0, temperature) if actor_qat else temperature)
     rng, key = jax.random.split(rng)
-    actions = dist.sample(seed=key)
+    if actor_qat:
+        actions = jax.lax.cond(temperature == 0,
+                               lambda _: jnp.tanh(dist.distribution.loc),
+                               lambda _: dist.sample(seed=key), operand=None)
+    else:
+        actions = dist.sample(seed=key)
     return rng, actions
 
 
@@ -458,7 +464,17 @@ class BRC(object):
         fp8_output_dense_kernel: bool = False,
         critic_optimizer_state: str = 'fp32',
         critic_residual_compute_format: str = 'legacy',
+        actor_training_recipe: str = 'fp32',
+        actor_export_align_start: int = 450000,
     ) -> None:
+        from jaxrl.low_precision.actor_qat_dense import RECIPE
+        if actor_training_recipe not in ('fp32', RECIPE):
+            raise ValueError('unknown actor training recipe')
+        if actor_export_align_start < 0:
+            raise ValueError('actor export alignment step must be nonnegative')
+        self.actor_training_recipe = actor_training_recipe
+        self.actor_export_align_start = actor_export_align_start
+        self.actor_env_step = 0
         if critic_optimizer_state not in MOMENT_MODES:
             raise ValueError(f'Unknown critic_optimizer_state: {critic_optimizer_state}')
         if critic_optimizer_state != 'fp32' and (
@@ -513,7 +529,9 @@ class BRC(object):
         def _init_models(seed):
             rng = jax.random.PRNGKey(seed)
             rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
-            actor_def = NormalTanhPolicy(action_dim=action_dim, hidden_dims=width_actor)
+            actor_def = NormalTanhPolicy(action_dim=action_dim, hidden_dims=width_actor,
+                                        actor_training_recipe=actor_training_recipe,
+                                        actor_export_aligned=actor_export_align_start == 0)
             critic_def = Critic(
                 num_tasks=num_tasks,
                 embedding_size=embedding_size,
@@ -564,6 +582,8 @@ class BRC(object):
                 fp8_output_dense_kernel=fp8_output_dense_kernel,
             )
             actor = Model.create(actor_def, inputs=[actor_key, actor_init], tx=optax.adamw(learning_rate=actor_lr))
+            from jaxrl.low_precision.actor_qat_dense import initialize_actor
+            actor = initialize_actor(actor)
             critic = Model.create(
                 critic_def,
                 inputs=[critic_key, observations, actions, task_ids_init],
@@ -603,6 +623,22 @@ class BRC(object):
         self.last_online_resident_diagnostics = None
         self.step = 1
 
+    @property
+    def actor_phase(self):
+        if self.actor_training_recipe == 'fp32':
+            return 'fp32'
+        return 'export_align' if self.actor.apply_fn.actor_export_aligned else 'carry_main'
+
+    def set_env_step(self, env_step: int):
+        """Call before rollout; update also enforces this for non-train callers."""
+        self.actor_env_step = int(env_step)
+        aligned = self.actor_env_step >= self.actor_export_align_start
+        changed = False
+        if self.actor_training_recipe != 'fp32' and self.actor.apply_fn.actor_export_aligned != aligned:
+            self.actor = self.actor.replace(apply_fn=self.actor.apply_fn.clone(actor_export_aligned=aligned))
+            changed = True
+        return changed
+
     def sample_actions(self, observations: np.ndarray, temperature: float = 1.0):
         inputs = build_actor_input(self.critic, observations, self.task_ids, self.multitask)
         rng, actions = _sample_actions(self.rng, self.actor, inputs, temperature)
@@ -617,7 +653,7 @@ class BRC(object):
         env_step: int,
         collect_update_diagnostics: bool = False,
     ):
-
+        self.set_env_step(env_step)
         (
             step,
             rng,
@@ -710,6 +746,7 @@ class BRC(object):
 
     def get_tensor_diagnostics(self, batch: Batch):
         """Return device-resident trees used only at tensor-stat intervals."""
+        from jaxrl.low_precision.actor_qat_dense import enabled, logical_params
         target_params = reconstruct_target_params(
             self.critic, self.target_critic
         )
@@ -744,7 +781,7 @@ class BRC(object):
         )
         diagnostics = {
             'params': {
-                'actor': self.actor.params,
+                'actor': logical_params(self.actor) if enabled(self.actor) else self.actor.params,
                 'critic': dequantize_critic_params(self.critic),
                 (
                     'target_critic_reconstructed'
@@ -916,11 +953,17 @@ class BRC(object):
                 'normalizer_rng': np.asarray(self.normalizer_rng),
                 'task_entropies': np.asarray(self.task_entropies),
                 'task_entropy_counts': np.asarray(self.task_entropy_counts),
+                'actor_training_recipe': self.actor_training_recipe,
+                'actor_export_align_start': self.actor_export_align_start,
+                'actor_env_step': self.actor_env_step,
+                'actor_phase': self.actor_phase,
             }, file)
         
     def load(self, path):
         import os
         import pickle
+        if self.actor_training_recipe != 'fp32' and not os.path.isfile(f'{path}/agent_state.pkl'):
+            raise ValueError('actor recipe checkpoint is missing phase/RNG state')
         target_critic = self.target_critic.load(
             f'{path}/target_critic.msgpack',
             require_fp8_metadata=(
@@ -929,7 +972,8 @@ class BRC(object):
                 )
             ),
         )
-        self.actor = self.actor.load(f'{path}/actor.msgpack')
+        self.actor = self.actor.load(f'{path}/actor.msgpack',
+                                     require_fp8_metadata=self.actor_training_recipe != 'fp32')
         self.critic = self.critic.load(
             f'{path}/critic.msgpack',
             require_fp8_metadata=self.critic_precision in (
@@ -942,6 +986,14 @@ class BRC(object):
         if os.path.exists(state_path):
             with open(state_path, 'rb') as file:
                 state = pickle.load(file)
+            if state.get('actor_training_recipe', 'fp32') != self.actor_training_recipe:
+                raise ValueError('checkpoint actor recipe mismatch')
+            if self.actor_training_recipe != 'fp32':
+                if state.get('actor_export_align_start') != self.actor_export_align_start:
+                    raise ValueError('checkpoint actor phase threshold mismatch')
+                self.set_env_step(state['actor_env_step'])
+                if state['actor_phase'] != self.actor_phase:
+                    raise ValueError('checkpoint actor phase / environment step mismatch')
             self.step = int(state['step'])
             self.rng = jnp.asarray(state['rng'])
             self.normalizer_rng = jnp.asarray(

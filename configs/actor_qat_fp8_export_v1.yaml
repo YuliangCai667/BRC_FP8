@@ -1,0 +1,48 @@
+# Fixed protocol. scripts/run_actor_qat_fp8_export.sh is the executable entrypoint.
+base_commit: 1dd21cb8b420f32c3c3bc33d8a0cd8f11a86ce6d
+imported_fix: ceil_amax_over_448_no_overflow
+env_names: DMC_DOGS
+seed: 42
+max_steps: 500000
+start_training: 5000
+batch_size: 1024
+updates_per_step: 2
+width_critic: 4096
+actor_width: 256
+actor_depth: 1
+actor_training_recipe: carry_body_bf16_edge_qat
+actor_body_compute: mxfp8_main_plus_carry
+actor_edge_storage: bf16
+actor_weight_qat: true
+actor_export_codec: e4m3fn_block32_fp32scale_rtn_v1
+actor_export_align_start: 450000
+actor_export_on_finish: true
+actor_adamw:
+  learning_rate: 0.0003
+  b1: 0.9
+  b2: 0.999
+  eps: 1.0e-8
+  weight_decay: 0.0001
+  moments: fp32
+critic_precision: fp8_resident
+fp8_resident_carry: true
+critic_residual_compute_format: mxfp8
+critic_optimizer_state: fp8_carry
+target_critic_precision: fp8_lag
+fp8_all_dense_kernels: false
+fp8_input_dense_kernel: false
+fp8_output_dense_kernel: false
+paper_alignment: true
+return_bootstrap: reward_mean
+replay_buffer_size: 1000000
+eval_seed_offset: 0
+eval_episodes: 10
+eval_interval: 5000
+tensor_stats_interval: 25000
+analysis_checkpoint_interval: 50000
+recovery_checkpoint_interval: 100000
+save_replay_buffer: true
+gpu_index: 1
+gpu_uuid: GPU-280b96e2-67fc-577e-ba63-1ccd9493c231
+wandb_entity: cai200661-sun-yat
+wandb_project: FP8 RL
